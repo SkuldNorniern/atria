@@ -1,9 +1,6 @@
 use std::time::Duration;
 
-use libc::{POLLIN, c_int, pollfd};
-
-use crate::readiness::{classify_descriptor, readable_indices};
-use crate::uapi::poll_descriptors;
+use crate::backend::{EvdevBackend, InputBackend};
 use crate::{DeviceClass, InputBatch, InputDevice, InputError, enumerate};
 
 /// One normalized report tagged with the stable index of its producing device.
@@ -72,34 +69,24 @@ impl InputSet {
         if self.devices.is_empty() {
             return Err(InputError::EmptyInputSet);
         }
-        let mut descriptors = self
-            .devices
-            .iter()
-            .map(|device| pollfd {
-                fd: device.raw_fd(),
-                events: POLLIN,
-                revents: 0,
-            })
-            .collect::<Vec<_>>();
-        let timeout_ms = timeout_milliseconds(timeout)?;
-        if poll_descriptors(&mut descriptors, timeout_ms)
-            .map_err(|errno| InputError::PollDescriptors { errno })?
-            == 0
-        {
+        let readiness = <EvdevBackend as InputBackend>::wait_readiness(
+            self.devices.iter().map(|device| &device.backend),
+            timeout,
+        )?;
+        if !<EvdevBackend as InputBackend>::has_ready(&readiness) {
             return Ok(Vec::new());
         }
 
         let mut batches = Vec::new();
         let mut retired = Vec::new();
-        let mut readable =
-            readable_indices(descriptors.iter().map(|descriptor| descriptor.revents)).peekable();
-        for (index, descriptor) in descriptors.iter().enumerate() {
-            let readiness = classify_descriptor(descriptor.revents);
+        for index in 0..self.devices.len() {
+            let descriptor_readiness =
+                <EvdevBackend as InputBackend>::readiness_at(&readiness, index);
             let device = &mut self.devices[index];
             let event_index = device.event_index();
-            let mut failed = readiness.has_failed();
+            let mut failed = descriptor_readiness.has_failed();
             let mut read_advanced_epoch = false;
-            if readable.next_if_eq(&index).is_some() {
+            if descriptor_readiness.is_readable() {
                 match device.read_batches() {
                     Ok(device_batches) => {
                         batches.extend(tag_batches(event_index, device_batches));
@@ -140,18 +127,6 @@ fn remove_indices<T>(values: &mut Vec<T>, indices: &[usize]) {
     for index in indices.iter().rev() {
         values.remove(*index);
     }
-}
-
-fn timeout_milliseconds(timeout: Option<Duration>) -> Result<c_int, InputError> {
-    let Some(timeout) = timeout else {
-        return Ok(-1);
-    };
-    let whole_milliseconds = timeout.as_millis();
-    let has_partial_millisecond = timeout.subsec_nanos() % 1_000_000 != 0;
-    let milliseconds = whole_milliseconds
-        .checked_add(u128::from(has_partial_millisecond))
-        .ok_or(InputError::PollTimeoutTooLong { timeout })?;
-    c_int::try_from(milliseconds).map_err(|_| InputError::PollTimeoutTooLong { timeout })
 }
 
 #[cfg(test)]
@@ -232,10 +207,5 @@ mod tests {
         let mut devices = vec![10, 11, 12, 13];
         remove_indices(&mut devices, &[1, 3]);
         assert_eq!(devices, [10, 12]);
-    }
-
-    #[test]
-    fn submillisecond_timeout_rounds_up_to_avoid_an_early_wakeup() {
-        assert_eq!(timeout_milliseconds(Some(Duration::from_nanos(1))), Ok(1));
     }
 }

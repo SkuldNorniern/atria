@@ -3,6 +3,7 @@
 //! This package deliberately exposes only the key vocabulary it normalizes. Pointer, touch,
 //! tablet, switch, and gesture records remain unhandled instead of being approximated.
 
+mod backend;
 mod device;
 mod epoch;
 mod error;
@@ -10,7 +11,6 @@ mod key;
 mod readiness;
 mod report;
 mod set;
-mod uapi;
 
 pub use device::{DeviceClass, EventTypeSet, InputDevice, enumerate};
 pub use epoch::{Epoch, EpochChange, InputBatch, InputPipeline, PipelineStatus};

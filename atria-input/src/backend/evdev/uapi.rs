@@ -9,9 +9,6 @@ use libc::{
 };
 
 pub const EV_KEY: u16 = 1;
-pub const EV_REL: u16 = 2;
-pub const EV_ABS: u16 = 3;
-pub const EV_SW: u16 = 5;
 pub const KEY_ESC: u16 = 1;
 pub const KEY_ENTER: u16 = 28;
 pub const KEY_UP: u16 = 103;
@@ -149,7 +146,7 @@ pub fn read_events(file: &File, events: &mut [InputEvent]) -> Result<usize, i32>
 pub fn poll_descriptors(descriptors: &mut [pollfd], timeout_ms: c_int) -> Result<usize, i32> {
     let descriptor_count = nfds_t::try_from(descriptors.len()).map_err(|_| EIO)?;
     // SAFETY: `descriptors` remains live and exclusively borrowed for all `descriptor_count`
-    // entries, and every contained descriptor remains owned by its InputDevice during the call.
+    // entries, and every contained descriptor remains owned by its EvdevBackend during the call.
     let result = unsafe { libc_poll(descriptors.as_mut_ptr(), descriptor_count, timeout_ms) };
     if result == -1 {
         Err(errno())

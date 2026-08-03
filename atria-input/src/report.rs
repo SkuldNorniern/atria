@@ -19,6 +19,8 @@ pub struct RawInputEvent {
 }
 
 impl RawInputEvent {
+    pub(crate) const ZERO: Self = Self::new(0, 0, 0, 0, 0);
+
     #[must_use]
     pub const fn new(
         seconds: i64,
