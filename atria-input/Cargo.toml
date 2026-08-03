@@ -1,0 +1,14 @@
+[package]
+name = "atria-input"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Evdev key input normalization for Atria"
+
+[dependencies]
+atria-protocol = { path = "../atria-protocol" }
+libc = "0.2"
+
+[lints]
+workspace = true

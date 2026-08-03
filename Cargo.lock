@@ -29,6 +29,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "atria-input"
+version = "0.1.0"
+dependencies = [
+ "atria-protocol",
+ "libc",
+]
+
+[[package]]
 name = "atria-protocol"
 version = "0.1.0"
 

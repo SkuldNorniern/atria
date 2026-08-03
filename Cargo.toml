@@ -3,6 +3,7 @@ members = [
     ".",
     "atria-compositor",
     "atria-drm",
+    "atria-input",
     "atria-protocol",
     "atria-software-output",
 ]
