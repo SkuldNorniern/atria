@@ -3,7 +3,7 @@ use std::io::Error as IoError;
 use std::mem::size_of;
 use std::os::fd::AsRawFd;
 
-use libc::{EIO, c_char, c_ulong, ioctl as libc_ioctl};
+use libc::{EIO, Ioctl, c_char, ioctl as libc_ioctl};
 
 pub const CAP_DUMB_BUFFER: u64 = 0x1;
 pub const CLIENT_CAP_ATOMIC: u64 = 3;
@@ -234,62 +234,62 @@ pub struct AtomicCommit {
 const DRM_TYPE: u32 = b'd' as u32;
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
-const fn request_none(number: u32) -> c_ulong {
-    ((DRM_TYPE << 8) | number) as c_ulong
+const fn request_none(number: u32) -> Ioctl {
+    ((DRM_TYPE << 8) | number) as Ioctl
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
-const fn request_read_write<T>(number: u32) -> c_ulong {
+const fn request_read_write<T>(number: u32) -> Ioctl {
     const READ_WRITE: u32 = 3;
-    ((READ_WRITE << 30) | ((size_of::<T>() as u32) << 16) | (DRM_TYPE << 8) | number) as c_ulong
+    ((READ_WRITE << 30) | ((size_of::<T>() as u32) << 16) | (DRM_TYPE << 8) | number) as Ioctl
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
-const fn request_write<T>(number: u32) -> c_ulong {
+const fn request_write<T>(number: u32) -> Ioctl {
     const WRITE: u32 = 1;
-    ((WRITE << 30) | ((size_of::<T>() as u32) << 16) | (DRM_TYPE << 8) | number) as c_ulong
+    ((WRITE << 30) | ((size_of::<T>() as u32) << 16) | (DRM_TYPE << 8) | number) as Ioctl
 }
 
 #[cfg(target_os = "freebsd")]
-const fn request_none(number: u32) -> c_ulong {
-    (0x2000_0000_u32 | (DRM_TYPE << 8) | number) as c_ulong
+const fn request_none(number: u32) -> Ioctl {
+    (0x2000_0000_u32 | (DRM_TYPE << 8) | number) as Ioctl
 }
 
 #[cfg(target_os = "freebsd")]
-const fn request_read_write<T>(number: u32) -> c_ulong {
+const fn request_read_write<T>(number: u32) -> Ioctl {
     (0xc000_0000_u32 | (((size_of::<T>() as u32) & 0x1fff) << 16) | (DRM_TYPE << 8) | number)
-        as c_ulong
+        as Ioctl
 }
 
 #[cfg(target_os = "freebsd")]
-const fn request_write<T>(number: u32) -> c_ulong {
+const fn request_write<T>(number: u32) -> Ioctl {
     (0x8000_0000_u32 | (((size_of::<T>() as u32) & 0x1fff) << 16) | (DRM_TYPE << 8) | number)
-        as c_ulong
+        as Ioctl
 }
 
-pub const IOCTL_GET_CAP: c_ulong = request_read_write::<GetCap>(0x0c);
-pub const IOCTL_SET_CLIENT_CAP: c_ulong = request_write::<SetClientCap>(0x0d);
-pub const IOCTL_SET_MASTER: c_ulong = request_none(0x1e);
-pub const IOCTL_DROP_MASTER: c_ulong = request_none(0x1f);
-pub const IOCTL_MODE_GETRESOURCES: c_ulong = request_read_write::<CardResources>(0xa0);
-pub const IOCTL_MODE_SETCRTC: c_ulong = request_read_write::<ModeCrtc>(0xa2);
-pub const IOCTL_MODE_GETENCODER: c_ulong = request_read_write::<GetEncoder>(0xa6);
-pub const IOCTL_MODE_GETCONNECTOR: c_ulong = request_read_write::<GetConnector>(0xa7);
-pub const IOCTL_MODE_GETPROPERTY: c_ulong = request_read_write::<GetProperty>(0xaa);
-pub const IOCTL_MODE_RMFB: c_ulong = request_read_write::<u32>(0xaf);
-pub const IOCTL_MODE_CREATE_DUMB: c_ulong = request_read_write::<CreateDumb>(0xb2);
-pub const IOCTL_MODE_MAP_DUMB: c_ulong = request_read_write::<MapDumb>(0xb3);
-pub const IOCTL_MODE_DESTROY_DUMB: c_ulong = request_read_write::<DestroyDumb>(0xb4);
-pub const IOCTL_MODE_ADDFB2: c_ulong = request_read_write::<Framebuffer>(0xb8);
-pub const IOCTL_MODE_PAGE_FLIP: c_ulong = request_read_write::<PageFlip>(0xb0);
-pub const IOCTL_MODE_GETPLANERESOURCES: c_ulong = request_read_write::<PlaneResources>(0xb5);
-pub const IOCTL_MODE_GETPLANE: c_ulong = request_read_write::<GetPlane>(0xb6);
-pub const IOCTL_MODE_OBJ_GETPROPERTIES: c_ulong = request_read_write::<ObjectProperties>(0xb9);
-pub const IOCTL_MODE_ATOMIC: c_ulong = request_read_write::<AtomicCommit>(0xbc);
-pub const IOCTL_MODE_CREATEPROPBLOB: c_ulong = request_read_write::<CreateBlob>(0xbd);
-pub const IOCTL_MODE_DESTROYPROPBLOB: c_ulong = request_read_write::<DestroyBlob>(0xbe);
+pub const IOCTL_GET_CAP: Ioctl = request_read_write::<GetCap>(0x0c);
+pub const IOCTL_SET_CLIENT_CAP: Ioctl = request_write::<SetClientCap>(0x0d);
+pub const IOCTL_SET_MASTER: Ioctl = request_none(0x1e);
+pub const IOCTL_DROP_MASTER: Ioctl = request_none(0x1f);
+pub const IOCTL_MODE_GETRESOURCES: Ioctl = request_read_write::<CardResources>(0xa0);
+pub const IOCTL_MODE_SETCRTC: Ioctl = request_read_write::<ModeCrtc>(0xa2);
+pub const IOCTL_MODE_GETENCODER: Ioctl = request_read_write::<GetEncoder>(0xa6);
+pub const IOCTL_MODE_GETCONNECTOR: Ioctl = request_read_write::<GetConnector>(0xa7);
+pub const IOCTL_MODE_GETPROPERTY: Ioctl = request_read_write::<GetProperty>(0xaa);
+pub const IOCTL_MODE_RMFB: Ioctl = request_read_write::<u32>(0xaf);
+pub const IOCTL_MODE_CREATE_DUMB: Ioctl = request_read_write::<CreateDumb>(0xb2);
+pub const IOCTL_MODE_MAP_DUMB: Ioctl = request_read_write::<MapDumb>(0xb3);
+pub const IOCTL_MODE_DESTROY_DUMB: Ioctl = request_read_write::<DestroyDumb>(0xb4);
+pub const IOCTL_MODE_ADDFB2: Ioctl = request_read_write::<Framebuffer>(0xb8);
+pub const IOCTL_MODE_PAGE_FLIP: Ioctl = request_read_write::<PageFlip>(0xb0);
+pub const IOCTL_MODE_GETPLANERESOURCES: Ioctl = request_read_write::<PlaneResources>(0xb5);
+pub const IOCTL_MODE_GETPLANE: Ioctl = request_read_write::<GetPlane>(0xb6);
+pub const IOCTL_MODE_OBJ_GETPROPERTIES: Ioctl = request_read_write::<ObjectProperties>(0xb9);
+pub const IOCTL_MODE_ATOMIC: Ioctl = request_read_write::<AtomicCommit>(0xbc);
+pub const IOCTL_MODE_CREATEPROPBLOB: Ioctl = request_read_write::<CreateBlob>(0xbd);
+pub const IOCTL_MODE_DESTROYPROPBLOB: Ioctl = request_read_write::<DestroyBlob>(0xbe);
 
-pub fn ioctl<T>(file: &File, request: c_ulong, argument: &mut T) -> Result<(), i32> {
+pub fn ioctl<T>(file: &File, request: Ioctl, argument: &mut T) -> Result<(), i32> {
     // SAFETY: `argument` is a live, writable value whose `repr(C)` layout matches the
     // request. The file remains open for the duration of the call, and the kernel copies
     // only the request-defined extent.
