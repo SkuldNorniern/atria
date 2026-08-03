@@ -1,13 +1,13 @@
 use std::fs::File;
-use std::io::{Error as IoError, ErrorKind, Read};
+use std::io::Read;
 use std::mem::size_of;
 use std::slice::from_raw_parts_mut;
 
-use atria_software_output::{Frame, FrameReport, FrameSink, PixelLayout, SinkError};
+use atria_software_output::{Frame, FrameReport, PixelLayout};
 use libc::{EACCES, EBUSY, EIO, c_char};
 
-use crate::buffer::{DrmSink, ScanoutBuffer};
-use crate::uapi::{
+use crate::backend::ioctl::buffer::{IoctlBackend, ScanoutBuffer};
+use crate::backend::ioctl::uapi::{
     AtomicCommit, CreateBlob, DestroyBlob, EVENT_FLIP_COMPLETE, GetPlane, GetProperty,
     IOCTL_MODE_ATOMIC, IOCTL_MODE_CREATEPROPBLOB, IOCTL_MODE_DESTROYPROPBLOB, IOCTL_MODE_GETPLANE,
     IOCTL_MODE_GETPLANERESOURCES, IOCTL_MODE_GETPROPERTY, IOCTL_MODE_OBJ_GETPROPERTIES,
@@ -59,7 +59,7 @@ struct InitialAtomicProperties {
     plane_crtc_h: u32,
 }
 
-pub(crate) fn initialize_display(sink: &mut DrmSink) -> Result<(), DrmError> {
+pub(crate) fn initialize_display(sink: &mut IoctlBackend) -> Result<(), DrmError> {
     if sink.device.capabilities().atomic_commit() {
         initialize_atomic(sink)
     } else {
@@ -76,7 +76,7 @@ pub(crate) fn destroy_mode_blob(file: &File, path: &PresentationPath) {
     }
 }
 
-impl DrmSink {
+impl IoctlBackend {
     pub fn present(&mut self, frame: &Frame, _report: FrameReport) -> Result<(), DrmError> {
         if self.pending_index.is_some() {
             return Err(DrmError::FlipPending);
@@ -116,13 +116,7 @@ impl DrmSink {
     }
 }
 
-impl FrameSink for DrmSink {
-    fn present(&mut self, frame: &Frame, report: FrameReport) -> Result<(), SinkError> {
-        DrmSink::present(self, frame, report).map_err(drm_sink_error)
-    }
-}
-
-fn initialize_legacy(sink: &mut DrmSink) -> Result<(), DrmError> {
+fn initialize_legacy(sink: &mut IoctlBackend) -> Result<(), DrmError> {
     let mut connector_id = sink.device.connector().id;
     let mut modeset = ModeCrtc {
         set_connectors_ptr: pointer(&mut connector_id),
@@ -138,7 +132,7 @@ fn initialize_legacy(sink: &mut DrmSink) -> Result<(), DrmError> {
     Ok(())
 }
 
-fn initialize_atomic(sink: &mut DrmSink) -> Result<(), DrmError> {
+fn initialize_atomic(sink: &mut IoctlBackend) -> Result<(), DrmError> {
     let format = drm_format(sink.layout())?;
     let plane_id = find_primary_plane(sink, format)?;
     let properties = initial_atomic_properties(sink, plane_id)?;
@@ -167,7 +161,7 @@ fn initialize_atomic(sink: &mut DrmSink) -> Result<(), DrmError> {
 }
 
 fn commit_initial_atomic(
-    sink: &DrmSink,
+    sink: &IoctlBackend,
     plane_id: u32,
     properties: InitialAtomicProperties,
     mode_blob_id: u32,
@@ -225,7 +219,7 @@ fn commit_initial_atomic(
     ioctl(sink.device.file(), IOCTL_MODE_ATOMIC, &mut commit).map_err(atomic_commit_error)
 }
 
-fn atomic_flip(sink: &DrmSink, state: AtomicState, target: usize) -> Result<(), DrmError> {
+fn atomic_flip(sink: &IoctlBackend, state: AtomicState, target: usize) -> Result<(), DrmError> {
     let mut objects = [state.plane_id];
     let mut counts = [1_u32];
     let mut properties = [state.plane_fb_id];
@@ -245,7 +239,7 @@ fn atomic_flip(sink: &DrmSink, state: AtomicState, target: usize) -> Result<(), 
     ioctl(sink.device.file(), IOCTL_MODE_ATOMIC, &mut commit).map_err(atomic_commit_error)
 }
 
-fn legacy_flip(sink: &DrmSink, target: usize) -> Result<(), DrmError> {
+fn legacy_flip(sink: &IoctlBackend, target: usize) -> Result<(), DrmError> {
     let mut flip = PageFlip {
         crtc_id: sink.device.crtc_id(),
         fb_id: sink.buffers[target].framebuffer_id,
@@ -256,7 +250,7 @@ fn legacy_flip(sink: &DrmSink, target: usize) -> Result<(), DrmError> {
     ioctl(sink.device.file(), IOCTL_MODE_PAGE_FLIP, &mut flip).map_err(page_flip_error)
 }
 
-fn find_primary_plane(sink: &DrmSink, format: DrmFormat) -> Result<u32, DrmError> {
+fn find_primary_plane(sink: &IoctlBackend, format: DrmFormat) -> Result<u32, DrmError> {
     let crtc_index = sink
         .device
         .resources()
@@ -328,7 +322,7 @@ fn query_plane(file: &File, plane_id: u32) -> Result<Plane, DrmError> {
 }
 
 fn initial_atomic_properties(
-    sink: &DrmSink,
+    sink: &IoctlBackend,
     plane_id: u32,
 ) -> Result<InitialAtomicProperties, DrmError> {
     let connector = object_properties(
@@ -581,19 +575,6 @@ fn test_commit_error(errno: i32) -> DrmError {
         EBUSY => DrmError::DisplayBusy { errno },
         _ => DrmError::AtomicTestFailed { errno },
     }
-}
-
-fn drm_sink_error(error: DrmError) -> SinkError {
-    let io_error = match error {
-        DrmError::FlipPending => IoError::from(ErrorKind::WouldBlock),
-        DrmError::DisplayAccessLost { errno }
-        | DrmError::DisplayBusy { errno }
-        | DrmError::AtomicCommit { errno }
-        | DrmError::PageFlip { errno }
-        | DrmError::ReadFlipEvent { errno } => IoError::from_raw_os_error(errno),
-        _ => IoError::from(ErrorKind::InvalidInput),
-    };
-    SinkError::from(io_error)
 }
 
 fn usize_count(value: u32) -> Result<usize, DrmError> {

@@ -5,7 +5,7 @@ use std::path::Path;
 
 use libc::{EINVAL, EIO, ENOENT, EOPNOTSUPP};
 
-use crate::uapi::{
+use crate::backend::ioctl::uapi::{
     CAP_DUMB_BUFFER, CLIENT_CAP_ATOMIC, CardResources, GetCap, GetConnector, GetEncoder,
     IOCTL_DROP_MASTER, IOCTL_GET_CAP, IOCTL_MODE_GETCONNECTOR, IOCTL_MODE_GETENCODER,
     IOCTL_MODE_GETRESOURCES, IOCTL_SET_CLIENT_CAP, IOCTL_SET_MASTER, MODE_CONNECTED, ModeInfo,

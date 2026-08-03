@@ -8,8 +8,8 @@ use atria_protocol::capability::CapabilitySet;
 use atria_software_output::PixelLayout;
 use libc::{EFAULT, MAP_FAILED, MAP_SHARED, PROT_READ, PROT_WRITE, mmap, munmap, off_t};
 
-use crate::present::{PresentationPath, destroy_mode_blob, initialize_display};
-use crate::uapi::{
+use crate::backend::ioctl::present::{PresentationPath, destroy_mode_blob, initialize_display};
+use crate::backend::ioctl::uapi::{
     CreateDumb, DestroyDumb, Framebuffer, IOCTL_MODE_ADDFB2, IOCTL_MODE_CREATE_DUMB,
     IOCTL_MODE_DESTROY_DUMB, IOCTL_MODE_MAP_DUMB, IOCTL_MODE_RMFB, MapDumb, errno, ioctl,
 };
@@ -25,7 +25,7 @@ pub(crate) struct ScanoutBuffer {
 }
 
 #[derive(Debug)]
-pub struct DrmSink {
+pub struct IoctlBackend {
     pub(crate) device: DrmDevice,
     pub(crate) buffers: [ScanoutBuffer; 2],
     pub(crate) scanning_index: usize,
@@ -34,7 +34,7 @@ pub struct DrmSink {
     layout: PixelLayout,
 }
 
-impl DrmSink {
+impl IoctlBackend {
     pub fn open(config: DeviceConfig, layout: PixelLayout) -> Result<Self, DrmError> {
         let device = DrmDevice::open(config)?;
         if !device.capabilities().dumb_buffers() {
@@ -76,7 +76,7 @@ impl DrmSink {
     }
 }
 
-impl Drop for DrmSink {
+impl Drop for IoctlBackend {
     fn drop(&mut self) {
         destroy_mode_blob(self.device.file(), &self.presentation);
         // Framebuffer IDs are detached before their backing handles disappear.
@@ -160,7 +160,7 @@ fn allocate_after_create(
     })?;
     // SAFETY: the DRM driver returned `offset` for this live dumb-buffer handle, `size`
     // was checked against the kernel-reported allocation, and the file remains open while
-    // the mapping is owned by `DrmSink`.
+    // the mapping is owned by `IoctlBackend`.
     let mapped = unsafe {
         mmap(
             null_mut(),

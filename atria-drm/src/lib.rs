@@ -1,19 +1,17 @@
 //! Direct DRM/KMS scanout for software-composited Atria frames.
 
-mod buffer;
-mod device;
+mod backend;
 mod error;
 mod logic;
-mod present;
-mod uapi;
+mod sink;
 
-pub use buffer::DrmSink;
-pub use device::{Connector, DeviceConfig, DrmDevice, Encoder, ResourceSnapshot};
+pub use backend::{Connector, DeviceConfig, DrmDevice, Encoder, ResourceSnapshot};
 pub use error::DrmError;
 pub use logic::{
     BufferGeometry, DrmFormat, Mode, ModeSelection, buffer_geometry, drm_format, next_buffer_index,
     select_mode,
 };
+pub use sink::DrmSink;
 
 use atria_protocol::capability::{Capability, CapabilitySet};
 
