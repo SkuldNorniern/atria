@@ -13,6 +13,9 @@ pub enum Capability {
     GpuPrime,
     ExplicitGpuFence,
     RevocableSeat,
+    DrmDumbBuffer,
+    DrmAtomicCommit,
+    DrmPageFlip,
 }
 
 impl Capability {
@@ -33,6 +36,9 @@ impl Capability {
             Self::GpuPrime => "gpu_prime",
             Self::ExplicitGpuFence => "explicit_gpu_fence",
             Self::RevocableSeat => "revocable_seat",
+            Self::DrmDumbBuffer => "drm_dumb_buffer",
+            Self::DrmAtomicCommit => "drm_atomic_commit",
+            Self::DrmPageFlip => "drm_page_flip",
         }
     }
 }
