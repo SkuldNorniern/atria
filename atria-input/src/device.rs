@@ -1,6 +1,7 @@
 use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
 use std::mem::size_of;
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
@@ -122,6 +123,11 @@ impl InputDevice {
             event_index: self.event_index,
             errno,
         })?;
+        if bytes == 0 {
+            return Err(InputError::EndOfInput {
+                event_index: self.event_index,
+            });
+        }
         if bytes % size_of::<InputEvent>() != 0 {
             self.pipeline.advance(EpochChange::Device)?;
             return Err(InputError::InvalidReadLength { bytes });
@@ -146,6 +152,32 @@ impl InputDevice {
             }
         }
         Ok(batches)
+    }
+
+    pub(crate) fn raw_fd(&self) -> RawFd {
+        self.file.as_raw_fd()
+    }
+
+    pub(crate) fn retire(&mut self) -> Result<InputBatch, InputError> {
+        let epoch = self.pipeline.advance(EpochChange::Device)?;
+        Ok(InputBatch::Discontinuity { epoch })
+    }
+
+    pub(crate) fn current_discontinuity(&self) -> InputBatch {
+        InputBatch::Discontinuity {
+            epoch: self.pipeline.epoch(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(event_index: u32, file: File, class: DeviceClass) -> Self {
+        Self {
+            event_index,
+            file,
+            class,
+            reported_keys: [0; KEY_STATE_BYTES],
+            pipeline: InputPipeline::new(),
+        }
     }
 }
 

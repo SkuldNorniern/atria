@@ -3,7 +3,10 @@ use std::io::Error as IoError;
 use std::mem::size_of;
 use std::os::fd::AsRawFd;
 
-use libc::{EIO, Ioctl, c_int, c_void, ioctl as libc_ioctl, read as libc_read, timeval};
+use libc::{
+    EIO, Ioctl, c_int, c_void, ioctl as libc_ioctl, nfds_t, poll as libc_poll, pollfd,
+    read as libc_read, timeval,
+};
 
 pub const EV_KEY: u16 = 1;
 pub const EV_REL: u16 = 2;
@@ -136,6 +139,18 @@ pub fn read_events(file: &File, events: &mut [InputEvent]) -> Result<usize, i32>
             byte_count,
         )
     };
+    if result == -1 {
+        Err(errno())
+    } else {
+        usize::try_from(result).map_err(|_| EIO)
+    }
+}
+
+pub fn poll_descriptors(descriptors: &mut [pollfd], timeout_ms: c_int) -> Result<usize, i32> {
+    let descriptor_count = nfds_t::try_from(descriptors.len()).map_err(|_| EIO)?;
+    // SAFETY: `descriptors` remains live and exclusively borrowed for all `descriptor_count`
+    // entries, and every contained descriptor remains owned by its InputDevice during the call.
+    let result = unsafe { libc_poll(descriptors.as_mut_ptr(), descriptor_count, timeout_ms) };
     if result == -1 {
         Err(errno())
     } else {

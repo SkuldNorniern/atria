@@ -1,9 +1,11 @@
 use std::error::Error;
 use std::fmt;
+use std::time::Duration;
 
 /// A failed precondition at the evdev or normalization boundary.
 #[derive(Debug, Eq, PartialEq)]
 pub enum InputError {
+    EmptyInputSet,
     DeviceAbsent { event_index: u32 },
     OpenDevice { event_index: u32, errno: i32 },
     QueryEventTypes { event_index: u32, errno: i32 },
@@ -12,7 +14,10 @@ pub enum InputError {
     SetMonotonicClock { event_index: u32, errno: i32 },
     DeviceUnhandled { event_index: u32 },
     ReadEvents { event_index: u32, errno: i32 },
+    EndOfInput { event_index: u32 },
     InvalidReadLength { bytes: usize },
+    PollDescriptors { errno: i32 },
+    PollTimeoutTooLong { timeout: Duration },
     ReacquisitionRequired,
     ReacquisitionNotRequired,
     EpochOverflow,
@@ -25,6 +30,7 @@ pub enum InputError {
 impl fmt::Display for InputError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::EmptyInputSet => formatter.write_str("an input set must contain a key device"),
             Self::DeviceAbsent { event_index } => {
                 write!(formatter, "/dev/input/event{event_index} is absent")
             }
@@ -56,9 +62,25 @@ impl fmt::Display for InputError {
                 formatter,
                 "reading /dev/input/event{event_index} failed with errno {errno}"
             ),
+            Self::EndOfInput { event_index } => write!(
+                formatter,
+                "/dev/input/event{event_index} reached the end of its input stream"
+            ),
             Self::InvalidReadLength { bytes } => write!(
                 formatter,
                 "evdev returned {bytes} bytes instead of complete input_event records"
+            ),
+            Self::PollDescriptors { errno } => {
+                write!(
+                    formatter,
+                    "waiting for input descriptors failed with errno {errno}"
+                )
+            }
+            Self::PollTimeoutTooLong { timeout } => write!(
+                formatter,
+                "input timeout of {}.{:09} seconds exceeds poll(2)'s range",
+                timeout.as_secs(),
+                timeout.subsec_nanos()
             ),
             Self::ReacquisitionRequired => formatter
                 .write_str("evdev key state must be reacquired after an input discontinuity"),

@@ -32,11 +32,14 @@ pub fn classify_descriptor(revents: i16) -> DescriptorReadiness {
 }
 
 /// Selects only descriptors for which the kernel reported readable data.
-pub fn readable_indices(revents: &[i16]) -> impl Iterator<Item = usize> + '_ {
+pub fn readable_indices<I>(revents: I) -> impl Iterator<Item = usize>
+where
+    I: IntoIterator<Item = i16>,
+{
     revents
-        .iter()
+        .into_iter()
         .enumerate()
-        .filter_map(|(index, revents)| classify_descriptor(*revents).is_readable().then_some(index))
+        .filter_map(|(index, revents)| classify_descriptor(revents).is_readable().then_some(index))
 }
 
 #[cfg(test)]
@@ -46,7 +49,7 @@ mod tests {
     #[test]
     fn only_readable_descriptors_are_selected() {
         let revents = [0, POLLIN, POLLERR, POLLIN | POLLHUP];
-        assert_eq!(readable_indices(&revents).collect::<Vec<_>>(), [1, 3]);
+        assert_eq!(readable_indices(revents).collect::<Vec<_>>(), [1, 3]);
     }
 
     #[test]

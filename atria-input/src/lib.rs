@@ -7,8 +7,9 @@ mod device;
 mod epoch;
 mod error;
 mod key;
-pub mod readiness;
+mod readiness;
 mod report;
+mod set;
 mod uapi;
 
 pub use device::{DeviceClass, EventTypeSet, InputDevice, enumerate};
@@ -16,6 +17,7 @@ pub use epoch::{Epoch, EpochChange, InputBatch, InputPipeline, PipelineStatus};
 pub use error::InputError;
 pub use key::{KeyAction, KeyCode, KeyEvent, KeyNormalizer};
 pub use report::{RawInputEvent, RawReport, ReportAccumulator, ReportStatus};
+pub use set::{DeviceInputBatch, InputSet};
 
 use atria_protocol::capability::{Capability, CapabilitySet};
 
