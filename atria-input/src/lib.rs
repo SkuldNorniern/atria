@@ -7,6 +7,7 @@ mod device;
 mod epoch;
 mod error;
 mod key;
+pub mod readiness;
 mod report;
 mod uapi;
 
