@@ -1,8 +1,14 @@
-//! Presents one full-screen test pattern through `/dev/dri/card0` and exits.
+//! Presents a moving test pattern through `/dev/dri/card0`.
 //!
 //! This requires DRM master access to real KMS hardware:
 //! `cargo run -p atria-drm --example hardware-first-light`.
+//!
+//! Repeated presentation is the point: a single frame exercises mode setting only, while a
+//! sequence exercises the flip path, its completion events, and the rule that a flip is never
+//! queued while one is pending. `ARTERY_FRAMES` bounds the run for unattended use; without it
+//! the pattern runs until the process is terminated, so a human can look at it.
 
+use std::env::var;
 use std::error::Error;
 use std::fmt;
 
@@ -86,7 +92,7 @@ fn id(raw: u32) -> ObjectId {
     ObjectId::from_raw(raw)
 }
 
-fn test_pattern(size: Size) -> Result<Vec<u8>, DrmError> {
+fn test_pattern(size: Size, phase: u32) -> Result<Vec<u8>, DrmError> {
     let pixel_count = u64::from(size.width)
         .checked_mul(u64::from(size.height))
         .ok_or(DrmError::ArithmeticOverflow)?;
@@ -99,7 +105,11 @@ fn test_pattern(size: Size) -> Result<Vec<u8>, DrmError> {
         for x in 0..size.width {
             let red = ((u64::from(x) * 255) / u64::from(size.width)) as u8;
             let green = ((u64::from(y) * 255) / u64::from(size.height)) as u8;
-            let blue = if (x / 64 + y / 64) % 2 == 0 { 48 } else { 192 };
+            let blue = if ((x / 64) + (y / 64) + u32::from(phase as u16 / 8)) % 2 == 0 {
+                48
+            } else {
+                192
+            };
             // XRGB8888 is B, G, R, unused in little-endian byte order.
             bytes.extend_from_slice(&[blue, green, red, 0]);
         }
@@ -158,34 +168,65 @@ fn main() -> Result<(), HardwareFirstLightError> {
             connection,
             object_id: id(300),
         },
-        SoftwareBuffer::new(descriptor, layout, test_pattern(size)?)?,
+        SoftwareBuffer::new(descriptor, layout, test_pattern(size, 0)?)?,
     );
-    state.dispatch(
-        connection,
-        ClientRequest::Attach {
-            surface: id(257),
-            buffer: id(300),
-            offset: Point::default(),
-            acquire_fence: None,
-        },
-    )?;
-    state.dispatch(
-        connection,
-        ClientRequest::Damage {
-            surface: id(257),
-            rect: Rect {
-                x: 0,
-                y: 0,
-                width: size.width,
-                height: size.height,
-            },
-        },
-    )?;
-    state.dispatch(connection, ClientRequest::Commit { surface: id(257) })?;
-
     let mut output = SoftwareOutput::new(size, layout)?;
-    let report = output.compose(&mut state, &buffers, 0)?;
-    sink.present(output.frame(), report)?;
-    sink.complete_flip()?;
-    Ok(())
+    let frame_limit = match var("ARTERY_FRAMES") {
+        Ok(value) => value.parse::<u64>().ok(),
+        Err(_) => None,
+    };
+
+    let buffer_key = BufferKey {
+        connection,
+        object_id: id(300),
+    };
+    let mut phase = 0u32;
+    let mut presented = 0u64;
+    loop {
+        let _ = buffers.insert(
+            buffer_key,
+            SoftwareBuffer::new(descriptor, layout, test_pattern(size, phase)?)?,
+        );
+        // Each frame is a full attach/damage/commit cycle: a commit consumes the attached
+        // buffer, so damage alone does not make a new frame.
+        state.dispatch(
+            connection,
+            ClientRequest::Attach {
+                surface: id(257),
+                buffer: id(300),
+                offset: Point::default(),
+                acquire_fence: None,
+            },
+        )?;
+        state.dispatch(
+            connection,
+            ClientRequest::Damage {
+                surface: id(257),
+                rect: Rect {
+                    x: 0,
+                    y: 0,
+                    width: size.width,
+                    height: size.height,
+                },
+            },
+        )?;
+        state.dispatch(connection, ClientRequest::Commit { surface: id(257) })?;
+
+        let report = output.compose(&mut state, &buffers, presented)?;
+        sink.present(output.frame(), report)?;
+        // Waiting for the completion before the next present is the backpressure rule: the
+        // sink refuses a queued flip while one is in flight, so the loop cannot outrun the
+        // display.
+        sink.complete_flip()?;
+        // No explicit release: presenting the next commit supersedes the previous one and
+        // returns the buffer to the client, so the buffer is Available again by the time the
+        // next attach runs. Releasing here would be a second release of an available buffer.
+
+        presented += 1;
+        phase = phase.wrapping_add(1);
+        if frame_limit.is_some_and(|limit| presented >= limit) {
+            println!("presented {presented} frames");
+            return Ok(());
+        }
+    }
 }
