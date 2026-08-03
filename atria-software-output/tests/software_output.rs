@@ -351,3 +351,99 @@ fn gpu_buffers_are_rejected_instead_of_imported() {
         ))
     );
 }
+
+/// A client presenting continuously reuses one buffer, so every frame must return it to
+/// `Available` before the next attach. This is the cycle a scanout backend drives; getting it
+/// wrong shows up as `InvalidState` on the buffer, which is what the DRM example hit on
+/// hardware. Running it here, with no device involved, is what makes that a caught bug rather
+/// than a boot cycle.
+#[test]
+fn one_buffer_can_be_presented_repeatedly() {
+    let (mut state, connection) = setup();
+    create_surface(&mut state, connection, 257);
+    let surface = SurfaceKey {
+        connection,
+        object_id: id(257),
+    };
+    state
+        .place_surface(surface, Point::default())
+        .unwrap_or_else(|error| panic!("surface places: {error:?}"));
+
+    let spec = packed_descriptor(2, 2);
+    state
+        .dispatch(
+            connection,
+            ClientRequest::ImportBuffer {
+                new_id: id(300),
+                descriptor: spec,
+            },
+        )
+        .unwrap_or_else(|error| panic!("buffer imports: {error:?}"));
+
+    let key = BufferKey {
+        connection,
+        object_id: id(300),
+    };
+    let mut store = BufferStore::new();
+    let mut output = SoftwareOutput::new(
+        Size {
+            width: 2,
+            height: 2,
+        },
+        layout(),
+    )
+    .unwrap_or_else(|error| panic!("output is valid: {error:?}"));
+    let mut sink = HeadlessSink::new();
+
+    for frame in 0..4u64 {
+        let fill = u8::try_from(frame).unwrap_or(0);
+        let _ = store.insert(
+            key,
+            SoftwareBuffer::new(spec, layout(), vec![fill; 16])
+                .unwrap_or_else(|error| panic!("buffer {frame} is valid: {error:?}")),
+        );
+        state
+            .dispatch(
+                connection,
+                ClientRequest::Attach {
+                    surface: id(257),
+                    buffer: id(300),
+                    offset: Point::default(),
+                    acquire_fence: None,
+                },
+            )
+            .unwrap_or_else(|error| panic!("attach on frame {frame}: {error:?}"));
+        state
+            .dispatch(
+                connection,
+                ClientRequest::Damage {
+                    surface: id(257),
+                    rect: Rect {
+                        x: 0,
+                        y: 0,
+                        width: 2,
+                        height: 2,
+                    },
+                },
+            )
+            .unwrap_or_else(|error| panic!("damage on frame {frame}: {error:?}"));
+        state
+            .dispatch(connection, ClientRequest::Commit { surface: id(257) })
+            .unwrap_or_else(|error| panic!("commit on frame {frame}: {error:?}"));
+
+        output
+            .present_to(&mut state, &store, frame, &mut sink)
+            .unwrap_or_else(|error| panic!("present on frame {frame}: {error:?}"));
+
+        // Presenting hands the buffer back on its own: the commit that supersedes the
+        // previous one releases it. An explicit release here would be a second release of an
+        // already-available buffer.
+        assert_eq!(
+            state.buffer_state(connection, id(300)),
+            Some(BufferState::Available),
+            "frame {frame} must return the buffer to the client"
+        );
+    }
+
+    assert_eq!(sink.frames_presented(), 4);
+}
