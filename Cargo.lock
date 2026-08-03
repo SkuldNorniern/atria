@@ -8,6 +8,7 @@ version = "0.1.0"
 dependencies = [
  "atria-compositor",
  "atria-protocol",
+ "atria-software-output",
 ]
 
 [[package]]
@@ -20,3 +21,11 @@ dependencies = [
 [[package]]
 name = "atria-protocol"
 version = "0.1.0"
+
+[[package]]
+name = "atria-software-output"
+version = "0.1.0"
+dependencies = [
+ "atria-compositor",
+ "atria-protocol",
+]
