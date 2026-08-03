@@ -985,6 +985,18 @@ impl CompositorState {
             .map(|value| value.state)
     }
 
+    /// Returns validated metadata for a live imported buffer.
+    #[must_use]
+    pub fn buffer_descriptor(
+        &self,
+        connection: ConnectionId,
+        buffer: ObjectId,
+    ) -> Option<BufferDescriptor> {
+        self.buffer(connection, buffer)
+            .ok()
+            .map(|value| value.descriptor)
+    }
+
     pub fn take_events(&mut self) -> Vec<Event> {
         core::mem::take(&mut self.events)
     }
