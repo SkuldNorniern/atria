@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "atria-protocol"]
+members = [".", "atria-compositor", "atria-protocol"]
 resolver = "3"
 
 [workspace.package]
@@ -16,5 +16,5 @@ rust-version.workspace = true
 description = "User-facing facade for the Atria display server"
 
 [dependencies]
+atria-compositor = { path = "atria-compositor" }
 atria-protocol = { path = "atria-protocol" }
-

@@ -6,6 +6,14 @@ version = 4
 name = "atria"
 version = "0.1.0"
 dependencies = [
+ "atria-compositor",
+ "atria-protocol",
+]
+
+[[package]]
+name = "atria-compositor"
+version = "0.1.0"
+dependencies = [
  "atria-protocol",
 ]
 
