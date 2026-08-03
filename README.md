@@ -10,6 +10,9 @@ contains its wire protocol, backend-independent state machine, and first output 
   sessions, seats, and frame/buffer lifecycle state.
 - `atria-software-output` CPU-composites validated software buffers and presents complete
   frames to headless or file-backed sinks.
+- `atria-drm` owns the audited ioctl/mmap boundary and scans software-composited frames out
+  through atomic KMS or the reported legacy page-flip fallback.
 
 The protocol, compositor, and facade packages are `#![no_std]`. The software output package
-uses `std` for owned pixel storage and portable file I/O on Linux and FreeBSD.
+uses `std` for owned pixel storage and portable file I/O on Linux and FreeBSD. The DRM sink
+uses `std` plus the platform `libc` syscall boundary on those same targets.
