@@ -8,15 +8,19 @@
 //! Run with: cargo run --example first-light
 
 use atria_compositor::{
-    BufferDescriptor, BufferTransport, ClientRequest, CompositorState, ConnectionLimits, Point,
-    Rect, Size, SurfaceKey,
+    BufferDescriptor, BufferTransport, ClientRequest, CompositorState, ConnectionLimits,
+    NegotiationError, Point, Rect, Size, StateError, SurfaceKey,
 };
 use atria_protocol::ObjectId;
 use atria_software_output::{
-    BufferKey, BufferStore, Frame, FrameReport, FrameSink, PixelLayout, SinkError, SoftwareBuffer,
-    SoftwareOutput, capabilities,
+    BufferKey, BufferStore, Frame, FrameReport, FrameSink, PixelLayout, PresentError, SinkError,
+    SoftwareBuffer, SoftwareOutput, ValidationError, capabilities,
 };
+use core::fmt::{self, Display, Formatter};
+use std::error::Error;
 use std::fs::File;
+use std::fs::metadata;
+use std::io::Error as IoError;
 use std::io::Write;
 
 const WIDTH: u32 = 320;
@@ -72,7 +76,85 @@ impl FrameSink for PpmSink {
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// Everything this example can fail at, named.
+///
+/// `Box<dyn Error>` would allocate and erase the type for no benefit here: the failure
+/// set is small, closed, and known at compile time. An enum keeps every failure mode
+/// visible in the signature, which is the point of enum-based errors — a reader sees what
+/// can go wrong without running it, and adding a case is a compile error at every match.
+#[derive(Debug)]
+enum FirstLightError {
+    Layout(ValidationError),
+    Negotiation(NegotiationError),
+    Request(StateError),
+    Present(PresentError),
+    Sink(SinkError),
+    Io(IoError),
+}
+
+impl Display for FirstLightError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Layout(error) => write!(f, "pixel layout or buffer is invalid: {error}"),
+            Self::Negotiation(error) => write!(f, "capability negotiation failed: {error}"),
+            Self::Request(error) => write!(f, "the compositor rejected a request: {error}"),
+            Self::Present(error) => write!(f, "presenting the frame failed: {error}"),
+            Self::Sink(error) => write!(f, "the output sink failed: {error}"),
+            Self::Io(error) => write!(f, "reading back the written file failed: {error}"),
+        }
+    }
+}
+
+impl Error for FirstLightError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Layout(error) => Some(error),
+            Self::Negotiation(error) => Some(error),
+            Self::Request(error) => Some(error),
+            Self::Present(error) => Some(error),
+            Self::Sink(error) => Some(error),
+            Self::Io(error) => Some(error),
+        }
+    }
+}
+
+impl From<IoError> for FirstLightError {
+    fn from(error: IoError) -> Self {
+        Self::Io(error)
+    }
+}
+
+impl From<ValidationError> for FirstLightError {
+    fn from(error: ValidationError) -> Self {
+        Self::Layout(error)
+    }
+}
+
+impl From<NegotiationError> for FirstLightError {
+    fn from(error: NegotiationError) -> Self {
+        Self::Negotiation(error)
+    }
+}
+
+impl From<StateError> for FirstLightError {
+    fn from(error: StateError) -> Self {
+        Self::Request(error)
+    }
+}
+
+impl From<PresentError> for FirstLightError {
+    fn from(error: PresentError) -> Self {
+        Self::Present(error)
+    }
+}
+
+impl From<SinkError> for FirstLightError {
+    fn from(error: SinkError) -> Self {
+        Self::Sink(error)
+    }
+}
+
+fn main() -> Result<(), FirstLightError> {
     let layout = PixelLayout::new(BYTES_PER_PIXEL as u8)?;
     let software_profile = capabilities();
     let mut state = CompositorState::new(software_profile, ConnectionLimits::default());
@@ -174,7 +256,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "wrote {OUTPUT_PATH} ({}x{}, {} bytes)",
         WIDTH,
         HEIGHT,
-        std::fs::metadata(OUTPUT_PATH)?.len()
+        metadata(OUTPUT_PATH)?.len()
     );
     Ok(())
 }
