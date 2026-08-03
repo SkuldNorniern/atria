@@ -1,4 +1,6 @@
+use std::env::temp_dir;
 use std::fs;
+use std::process::id as process_id;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use atria_compositor::{
@@ -17,7 +19,7 @@ fn id(raw: u32) -> ObjectId {
 }
 
 fn layout() -> PixelLayout {
-    PixelLayout::new(4).expect("test layout is valid")
+    PixelLayout::new(4).unwrap_or_else(|error| panic!("test layout is valid: {error:?}"))
 }
 
 fn descriptor(width: u32, height: u32, stride: u32, byte_len: u64) -> BufferDescriptor {
@@ -42,10 +44,10 @@ fn setup() -> (CompositorState, ConnectionId) {
     let mut state = CompositorState::new(capabilities(), ConnectionLimits::default());
     let connection = state
         .connect(capabilities(), Default::default())
-        .expect("software profile negotiates");
+        .unwrap_or_else(|error| panic!("software profile negotiates: {error:?}"));
     state
         .create_session(connection, id(256), None, true)
-        .expect("session is valid");
+        .unwrap_or_else(|error| panic!("session is valid: {error:?}"));
     (state, connection)
 }
 
@@ -58,7 +60,7 @@ fn create_surface(state: &mut CompositorState, connection: ConnectionId, surface
                 new_id: id(surface),
             },
         )
-        .expect("surface is valid");
+        .unwrap_or_else(|error| panic!("surface is valid: {error:?}"));
     state
         .place_surface(
             SurfaceKey {
@@ -67,7 +69,7 @@ fn create_surface(state: &mut CompositorState, connection: ConnectionId, surface
             },
             Point::default(),
         )
-        .expect("surface placement is valid");
+        .unwrap_or_else(|error| panic!("surface placement is valid: {error:?}"));
 }
 
 fn import_attach_commit(
@@ -86,7 +88,7 @@ fn import_attach_commit(
                 descriptor,
             },
         )
-        .expect("buffer import is valid");
+        .unwrap_or_else(|error| panic!("buffer import is valid: {error:?}"));
     state
         .dispatch(
             connection,
@@ -97,7 +99,7 @@ fn import_attach_commit(
                 acquire_fence: None,
             },
         )
-        .expect("attachment is valid");
+        .unwrap_or_else(|error| panic!("attachment is valid: {error:?}"));
     if let Some(rect) = damage {
         state
             .dispatch(
@@ -107,7 +109,9 @@ fn import_attach_commit(
                     rect,
                 },
             )
-            .expect("nonzero damage is accepted by protocol state");
+            .unwrap_or_else(|error| {
+                panic!("nonzero damage is accepted by protocol state: {error:?}")
+            });
     }
     state
         .dispatch(
@@ -116,7 +120,7 @@ fn import_attach_commit(
                 surface: id(surface),
             },
         )
-        .expect("commit is valid");
+        .unwrap_or_else(|error| panic!("commit is valid: {error:?}"));
 }
 
 fn store_buffer(
@@ -131,7 +135,8 @@ fn store_buffer(
             connection,
             object_id: id(raw),
         },
-        SoftwareBuffer::new(descriptor, layout(), bytes).expect("test buffer is valid"),
+        SoftwareBuffer::new(descriptor, layout(), bytes)
+            .unwrap_or_else(|error| panic!("test buffer is valid: {error:?}")),
     );
 }
 
@@ -325,7 +330,7 @@ fn headless_and_file_sinks_report_and_store_complete_frames() {
         .duration_since(UNIX_EPOCH)
         .expect("clock after epoch")
         .as_nanos();
-    let path = std::env::temp_dir().join(format!("atria-frame-{}-{nonce}.raw", std::process::id()));
+    let path = temp_dir().join(format!("atria-frame-{}-{nonce}.raw", process_id()));
     let mut file = FileSink::create(&path).unwrap();
     output
         .present_to(&mut state, &store, 43, &mut file)

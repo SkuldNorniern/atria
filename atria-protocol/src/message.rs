@@ -1,7 +1,7 @@
 //! Payloads whose field layouts are explicitly specified by §§10, 12, and 17.
 
 use crate::error::ErrorCode;
-use crate::wire::{Decoder, Encoder, FdIndex, Header, padded_size};
+use crate::wire::{Decoder, Encoder, FdIndex, HEADER_SIZE, Header, padded_size};
 use crate::{DecodeError, EncodeError, ObjectId, Opcode};
 
 /// An encodable protocol payload.
@@ -29,12 +29,13 @@ pub fn encode_message(
     }
     header.encode(output)?;
     let available = output.len();
-    let payload_output = output
-        .get_mut(crate::wire::HEADER_SIZE..message_len)
-        .ok_or(EncodeError::BufferTooSmall {
-            needed: message_len,
-            available,
-        })?;
+    let payload_output =
+        output
+            .get_mut(HEADER_SIZE..message_len)
+            .ok_or(EncodeError::BufferTooSmall {
+                needed: message_len,
+                available,
+            })?;
     let mut encoder = Encoder::new(payload_output);
     payload.encode(&mut encoder)?;
     if encoder.position() != payload_len {

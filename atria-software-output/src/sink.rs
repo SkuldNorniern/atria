@@ -1,5 +1,5 @@
 use std::fs::{File, OpenOptions};
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Error, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use crate::{Frame, FrameReport, SinkError};
@@ -64,8 +64,7 @@ impl FrameSink for FileSink {
         self.file.seek(SeekFrom::Start(0))?;
         self.file.write_all(frame.bytes())?;
         self.file.set_len(
-            u64::try_from(frame.bytes().len())
-                .map_err(|_| std::io::Error::other("frame too large"))?,
+            u64::try_from(frame.bytes().len()).map_err(|_| Error::other("frame too large"))?,
         )?;
         self.file.flush()?;
         Ok(())

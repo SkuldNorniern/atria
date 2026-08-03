@@ -1,3 +1,4 @@
+use core::error::Error;
 use core::fmt;
 
 use atria_protocol::ObjectId;
@@ -169,4 +170,4 @@ impl fmt::Display for StateError {
     }
 }
 
-impl core::error::Error for StateError {}
+impl Error for StateError {}

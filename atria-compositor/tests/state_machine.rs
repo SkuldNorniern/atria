@@ -34,13 +34,13 @@ fn state_with_limits(limits: ConnectionLimits) -> CompositorState {
 fn connect(state: &mut CompositorState) -> ConnectionId {
     state
         .connect(software_capabilities(), CapabilitySet::empty())
-        .expect("baseline capabilities overlap")
+        .unwrap_or_else(|error| panic!("baseline capabilities overlap: {error:?}"))
 }
 
 fn create_session(state: &mut CompositorState, connection: ConnectionId, raw: u32) {
     state
         .create_session(connection, id(raw), None, true)
-        .expect("session creation must succeed");
+        .unwrap_or_else(|error| panic!("session creation must succeed: {error:?}"));
 }
 
 fn create_surface(
@@ -57,7 +57,7 @@ fn create_surface(
                 new_id: id(surface),
             },
         )
-        .expect("surface creation must succeed");
+        .unwrap_or_else(|error| panic!("surface creation must succeed: {error:?}"));
 }
 
 fn import_buffer(state: &mut CompositorState, connection: ConnectionId, raw: u32) {
@@ -69,7 +69,7 @@ fn import_buffer(state: &mut CompositorState, connection: ConnectionId, raw: u32
                 descriptor: descriptor(100, 80),
             },
         )
-        .expect("buffer import must succeed");
+        .unwrap_or_else(|error| panic!("buffer import must succeed: {error:?}"));
 }
 
 fn attach_and_commit(
@@ -88,7 +88,7 @@ fn attach_and_commit(
                 acquire_fence: None,
             },
         )
-        .expect("attach must succeed");
+        .unwrap_or_else(|error| panic!("attach must succeed: {error:?}"));
     state
         .dispatch(
             connection,
@@ -96,7 +96,7 @@ fn attach_and_commit(
                 surface: id(surface),
             },
         )
-        .expect("commit must succeed");
+        .unwrap_or_else(|error| panic!("commit must succeed: {error:?}"));
 }
 
 #[test]

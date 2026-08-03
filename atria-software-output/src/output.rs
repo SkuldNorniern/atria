@@ -1,7 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::error::Error;
+use std::fmt;
 
 use atria_compositor::{
-    BufferState, CommitId, CompositorState, Damage, Point, Rect, Size, SurfaceKey,
+    BufferDescriptor, BufferState, BufferTransport, CommitId, CompositorState, Damage, Point, Rect,
+    Size, SurfaceKey,
 };
 
 use crate::{
@@ -243,8 +246,8 @@ pub enum PresentError {
     Sink(SinkError),
 }
 
-impl std::fmt::Display for PresentError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for PresentError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Compose(error) => write!(formatter, "frame composition failed: {error}"),
             Self::Sink(error) => write!(formatter, "frame presentation failed: {error}"),
@@ -252,8 +255,8 @@ impl std::fmt::Display for PresentError {
     }
 }
 
-impl std::error::Error for PresentError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+impl Error for PresentError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Compose(error) => Some(error),
             Self::Sink(error) => Some(error),
@@ -262,11 +265,11 @@ impl std::error::Error for PresentError {
 }
 
 fn validate_for_layout(
-    descriptor: atria_compositor::BufferDescriptor,
+    descriptor: BufferDescriptor,
     layout: PixelLayout,
     backing_len: usize,
 ) -> Result<(), ValidationError> {
-    if descriptor.transport != atria_compositor::BufferTransport::SoftwareShm {
+    if descriptor.transport != BufferTransport::SoftwareShm {
         return Err(ValidationError::UnsupportedTransport(descriptor.transport));
     }
     let width = descriptor.size.width;

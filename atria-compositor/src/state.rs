@@ -1,6 +1,8 @@
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
+use core::error::Error;
 use core::fmt;
+use core::mem::take;
 
 use atria_protocol::ObjectId;
 use atria_protocol::capability::{Capability, CapabilitySet};
@@ -62,7 +64,7 @@ impl fmt::Display for NegotiationError {
     }
 }
 
-impl core::error::Error for NegotiationError {}
+impl Error for NegotiationError {}
 
 #[derive(Clone, Debug)]
 enum Object {
@@ -509,7 +511,7 @@ impl CompositorState {
             let damage = if state.pending.damage.is_empty() {
                 alloc::vec![Damage::Full]
             } else {
-                core::mem::take(&mut state.pending.damage)
+                take(&mut state.pending.damage)
             };
             let refresh_range = state.pending.refresh_range.take().or_else(|| {
                 state
@@ -518,7 +520,7 @@ impl CompositorState {
                     .and_then(|value| value.snapshot.refresh_range)
             });
             let acquire_fence = state.pending.acquire_fence.take();
-            let callback = core::mem::take(&mut state.frame_requested);
+            let callback = take(&mut state.frame_requested);
             (
                 buffer,
                 offset,
@@ -1017,7 +1019,7 @@ impl CompositorState {
     }
 
     pub fn take_events(&mut self) -> Vec<Event> {
-        core::mem::take(&mut self.events)
+        take(&mut self.events)
     }
 
     pub fn close_connection(&mut self, connection: ConnectionId) -> Teardown {

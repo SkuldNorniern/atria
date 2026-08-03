@@ -307,9 +307,13 @@ fn error_ranges_versions_objects_and_capabilities_follow_policy() {
 }
 
 fn encode_payload(payload: &impl EncodePayload, output: &mut [u8]) -> usize {
-    let declared = payload.encoded_len().expect("length must compute");
+    let declared = payload
+        .encoded_len()
+        .unwrap_or_else(|error| panic!("length must compute: {error:?}"));
     let mut encoder = Encoder::new(output);
-    payload.encode(&mut encoder).expect("payload must fit");
+    payload
+        .encode(&mut encoder)
+        .unwrap_or_else(|error| panic!("payload must fit: {error:?}"));
     assert_eq!(encoder.position(), declared);
     declared
 }

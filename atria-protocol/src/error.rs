@@ -1,5 +1,6 @@
 //! Codec failures and protocol-reported error categories.
 
+use core::error::Error;
 use core::fmt;
 
 use crate::opcode::{Interface, MessageKind, Opcode};
@@ -119,9 +120,9 @@ impl fmt::Display for DecodeError {
     }
 }
 
-impl core::error::Error for EncodeError {}
+impl Error for EncodeError {}
 
-impl core::error::Error for DecodeError {}
+impl Error for DecodeError {}
 
 /// Error category defined by draft §10.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
