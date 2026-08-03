@@ -50,13 +50,72 @@ pub enum DecodeError {
 
 impl fmt::Display for EncodeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "ATRIA encoding error: {self:?}")
+        match self {
+            Self::SizeOverflow => formatter.write_str("encoded size cannot be represented"),
+            Self::MessageTooLarge { size, maximum } => write!(
+                formatter,
+                "encoded message is {size} bytes, exceeding the {maximum}-byte protocol maximum"
+            ),
+            Self::MisalignedSize { size } => write!(
+                formatter,
+                "encoded size {size} is not aligned to the required four-byte boundary"
+            ),
+            Self::BufferTooSmall { needed, available } => write!(
+                formatter,
+                "encoding needs {needed} bytes, but the destination has {available} bytes"
+            ),
+            Self::EncodedLengthMismatch { declared, actual } => write!(
+                formatter,
+                "payload declared {declared} encoded bytes but wrote {actual} bytes"
+            ),
+        }
     }
 }
 
 impl fmt::Display for DecodeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "ATRIA decoding error: {self:?}")
+        match self {
+            Self::Truncated { needed, available } => write!(
+                formatter,
+                "message needs {needed} bytes to decode, but only {available} bytes are available"
+            ),
+            Self::MessageTooSmall { size, minimum } => write!(
+                formatter,
+                "declared message size {size} is smaller than the {minimum}-byte header"
+            ),
+            Self::MessageTooLarge { size, maximum } => write!(
+                formatter,
+                "declared message size {size} exceeds the {maximum}-byte protocol maximum"
+            ),
+            Self::MisalignedSize { size } => write!(
+                formatter,
+                "decoded size {size} is not aligned to the required four-byte boundary"
+            ),
+            Self::SizeOverflow => formatter.write_str("decoded size cannot be represented"),
+            Self::TrailingBytes { declared, actual } => write!(
+                formatter,
+                "packet contains {actual} bytes, but the message declares only {declared} bytes"
+            ),
+            Self::InvalidUtf8 => formatter.write_str("message string is not valid UTF-8"),
+            Self::InvalidFdPlaceholder { value } => write!(
+                formatter,
+                "file-descriptor field contains {value:#010x} instead of the required placeholder"
+            ),
+            Self::UnknownOpcode {
+                interface,
+                kind,
+                opcode,
+            } => write!(
+                formatter,
+                "opcode {:#06x} is not defined for {interface:?} {kind:?} messages",
+                opcode.into_raw()
+            ),
+            Self::ForbiddenClientOpcode { opcode } => write!(
+                formatter,
+                "client opcode {:#06x} uses the compositor-internal debugging namespace",
+                opcode.into_raw()
+            ),
+        }
     }
 }
 

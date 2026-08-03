@@ -1,5 +1,6 @@
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
+use core::fmt;
 
 use atria_protocol::ObjectId;
 use atria_protocol::capability::{Capability, CapabilitySet};
@@ -44,6 +45,24 @@ pub enum NegotiationError {
     },
     ConnectionIdExhausted,
 }
+
+impl fmt::Display for NegotiationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedCapabilities {
+                required,
+                available,
+            } => write!(
+                formatter,
+                "connection requires capabilities {required:?}, but only {available:?} are mutually available"
+            ),
+            Self::ConnectionIdExhausted => formatter
+                .write_str("cannot create a connection because all connection IDs are exhausted"),
+        }
+    }
+}
+
+impl core::error::Error for NegotiationError {}
 
 #[derive(Clone, Debug)]
 enum Object {

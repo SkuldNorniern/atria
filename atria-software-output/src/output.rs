@@ -243,6 +243,24 @@ pub enum PresentError {
     Sink(SinkError),
 }
 
+impl std::fmt::Display for PresentError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Compose(error) => write!(formatter, "frame composition failed: {error}"),
+            Self::Sink(error) => write!(formatter, "frame presentation failed: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for PresentError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Compose(error) => Some(error),
+            Self::Sink(error) => Some(error),
+        }
+    }
+}
+
 fn validate_for_layout(
     descriptor: atria_compositor::BufferDescriptor,
     layout: PixelLayout,
