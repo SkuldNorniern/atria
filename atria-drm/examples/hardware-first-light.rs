@@ -105,7 +105,11 @@ fn test_pattern(size: Size, phase: u32) -> Result<Vec<u8>, DrmError> {
         for x in 0..size.width {
             let red = ((u64::from(x) * 255) / u64::from(size.width)) as u8;
             let green = ((u64::from(y) * 255) / u64::from(size.height)) as u8;
-            let blue = if ((x / 64) + (y / 64) + u32::from(phase as u16 / 8)) % 2 == 0 {
+            // Scroll the checkerboard horizontally rather than inverting it. Inverting the
+            // whole field every few frames reads as a strobe, which is indistinguishable
+            // from a fault; motion shows that frames are advancing and that they are not
+            // tearing.
+            let blue = if (((x + phase * 2) / 64) + (y / 64)) % 2 == 0 {
                 48
             } else {
                 192
