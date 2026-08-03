@@ -16,6 +16,7 @@ pub enum Capability {
     DrmDumbBuffer,
     DrmAtomicCommit,
     DrmPageFlip,
+    InputKeys,
 }
 
 impl Capability {
@@ -39,6 +40,7 @@ impl Capability {
             Self::DrmDumbBuffer => "drm_dumb_buffer",
             Self::DrmAtomicCommit => "drm_atomic_commit",
             Self::DrmPageFlip => "drm_page_flip",
+            Self::InputKeys => "input_keys",
         }
     }
 }
