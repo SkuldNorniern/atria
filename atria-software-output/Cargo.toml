@@ -1,0 +1,11 @@
+[package]
+name = "atria-software-output"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "CPU composition and output sinks for Atria compositor frames"
+
+[dependencies]
+atria-compositor = { path = "../atria-compositor" }
+atria-protocol = { path = "../atria-protocol" }
