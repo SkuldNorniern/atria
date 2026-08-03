@@ -62,6 +62,13 @@ pub struct InputDevice {
     event_index: u32,
     file: File,
     class: DeviceClass,
+    /// The key codes this device reports it can produce, as returned by `EVIOCGBIT(EV_KEY)`.
+    ///
+    /// Kept rather than discarded after classification because "reports some key" is too
+    /// coarse to choose a device by: an ACPI power button reports `KEY_POWER` and nothing
+    /// else, so it classifies identically to a keyboard. A caller that needs navigation keys
+    /// has to ask for them.
+    reported_keys: [u8; KEY_STATE_BYTES],
     pipeline: InputPipeline,
 }
 
@@ -81,6 +88,17 @@ impl InputDevice {
     #[must_use]
     pub const fn class(&self) -> DeviceClass {
         self.class
+    }
+
+    /// Whether the device reports it can produce `key`.
+    ///
+    /// Selecting a device by the keys it reports is what distinguishes a keyboard from any
+    /// other `EV_KEY` source, such as a power button or a lid switch.
+    #[must_use]
+    pub fn reports_key(&self, key: KeyCode) -> bool {
+        // Walking the set bits through the existing forward map avoids a second, reversed
+        // copy of the code table that could drift out of step with it.
+        set_key_codes(&self.reported_keys).any(|code| KeyCode::from_evdev(code) == Some(key))
     }
 
     #[must_use]
@@ -156,7 +174,7 @@ fn open_device(event_index: u32) -> Result<Option<InputDevice>, InputError> {
         }
     };
     let event_types = query_event_types(&file, event_index)?;
-    let class = classify(&file, event_index, event_types)?;
+    let (class, reported_keys) = classify(&file, event_index, event_types)?;
     if class == DeviceClass::KeyboardRemote {
         let mut clock_id = CLOCK_MONOTONIC;
         ioctl(&file, IOCTL_SET_CLOCK_ID, &mut clock_id)
@@ -170,6 +188,7 @@ fn open_device(event_index: u32) -> Result<Option<InputDevice>, InputError> {
         event_index,
         file,
         class,
+        reported_keys,
         pipeline,
     }))
 }
@@ -192,32 +211,37 @@ fn classify(
     file: &File,
     event_index: u32,
     event_types: EventTypeSet,
-) -> Result<DeviceClass, InputError> {
-    if !event_types.has_keys() {
-        return Ok(DeviceClass::Unhandled { event_types });
-    }
+) -> Result<(DeviceClass, [u8; KEY_STATE_BYTES]), InputError> {
     let mut bitmap = [0_u8; KEY_STATE_BYTES];
+    if !event_types.has_keys() {
+        return Ok((DeviceClass::Unhandled { event_types }, bitmap));
+    }
     ioctl(file, IOCTL_GET_KEY_CODES, &mut bitmap)
         .map_err(|errno| InputError::QueryKeyCodes { event_index, errno })?;
     if bitmap_has_supported_key(&bitmap) {
-        Ok(DeviceClass::KeyboardRemote)
+        Ok((DeviceClass::KeyboardRemote, bitmap))
     } else {
-        Ok(DeviceClass::Unhandled { event_types })
+        Ok((DeviceClass::Unhandled { event_types }, bitmap))
     }
 }
 
-fn bitmap_has_supported_key(bitmap: &[u8; KEY_STATE_BYTES]) -> bool {
-    bitmap.iter().enumerate().any(|(byte_index, byte)| {
-        (0_u8..8).any(|bit_index| {
-            let code = byte_index
+/// Every evdev code whose bit is set in a reported-key bitmap.
+fn set_key_codes(bitmap: &[u8; KEY_STATE_BYTES]) -> impl Iterator<Item = u16> + '_ {
+    bitmap.iter().enumerate().flat_map(|(byte_index, byte)| {
+        (0_u8..8).filter_map(move |bit_index| {
+            if byte & (1_u8 << bit_index) == 0 {
+                return None;
+            }
+            byte_index
                 .checked_mul(8)
                 .and_then(|base| base.checked_add(usize::from(bit_index)))
-                .and_then(|code| u16::try_from(code).ok());
-            code.is_some_and(|code| {
-                byte & (1_u8 << bit_index) != 0 && KeyCode::is_supported_evdev(code)
-            })
+                .and_then(|code| u16::try_from(code).ok())
         })
     })
+}
+
+fn bitmap_has_supported_key(bitmap: &[u8; KEY_STATE_BYTES]) -> bool {
+    set_key_codes(bitmap).any(KeyCode::is_supported_evdev)
 }
 
 fn device_path(event_index: u32) -> ([u8; 32], usize) {
