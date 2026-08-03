@@ -1,5 +1,11 @@
 [workspace]
-members = [".", "atria-compositor", "atria-protocol", "atria-software-output"]
+members = [
+    ".",
+    "atria-compositor",
+    "atria-drm",
+    "atria-protocol",
+    "atria-software-output",
+]
 resolver = "3"
 
 [workspace.package]
@@ -19,3 +25,14 @@ description = "User-facing facade for the Atria display server"
 atria-compositor = { path = "atria-compositor" }
 atria-protocol = { path = "atria-protocol" }
 atria-software-output = { path = "atria-software-output" }
+
+[lints]
+workspace = true
+
+[workspace.lints.clippy]
+absolute_paths = "deny"
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+unwrap_used = "warn"
+expect_used = "warn"

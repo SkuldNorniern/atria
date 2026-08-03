@@ -8,3 +8,5 @@ description = "Wire framing and object-model vocabulary for the Atria display pr
 
 [dependencies]
 
+[lints]
+workspace = true

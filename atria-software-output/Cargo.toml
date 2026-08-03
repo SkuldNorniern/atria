@@ -9,3 +9,6 @@ description = "CPU composition and output sinks for Atria compositor frames"
 [dependencies]
 atria-compositor = { path = "../atria-compositor" }
 atria-protocol = { path = "../atria-protocol" }
+
+[lints]
+workspace = true

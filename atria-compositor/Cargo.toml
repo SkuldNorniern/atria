@@ -8,3 +8,6 @@ description = "Backend-independent ATRIA compositor protocol state machine"
 
 [dependencies]
 atria-protocol = { path = "../atria-protocol" }
+
+[lints]
+workspace = true
