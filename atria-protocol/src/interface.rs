@@ -1,0 +1,337 @@
+//! The interface table: the one place an operation's interface, opcode and payload are stated.
+//!
+//! Everything else derives from here. Opcodes are not written down beside the code that uses
+//! them, message sizes are computed rather than asserted, and the decoder is driven by the same
+//! table the specification is checked against. A number that appears in exactly one place cannot
+//! drift from itself.
+//!
+//! Two invariants are enforced by the tests beside this module rather than by convention:
+//! an operation's opcode is its position in its interface's list, which is §12.2's dense-from-zero
+//! rule made mechanical; and every operation lists the interface and kind it is filed under, so a
+//! table entry cannot be filed in one place and describe another.
+
+use crate::wire::{HEADER_SIZE, HandleKind};
+
+/// One field of a payload, in wire order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Field {
+    /// A connection-scoped object identifier. Zero is null.
+    Object,
+    /// A slot in the message's handle array, carrying what must be in it.
+    Handle(HandleKind),
+    U32,
+    I32,
+    U64,
+    /// Length-prefixed UTF-8, padded to four bytes. Makes a message variable-length.
+    String,
+}
+
+impl Field {
+    /// Bytes this field occupies, or `None` when it is variable-length.
+    #[must_use]
+    pub const fn size(self) -> Option<usize> {
+        match self {
+            Self::Object | Self::Handle(_) | Self::U32 | Self::I32 => Some(4),
+            Self::U64 => Some(8),
+            Self::String => None,
+        }
+    }
+}
+
+/// Which interface an operation belongs to.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Interface {
+    Display,
+    Registry,
+    Compositor,
+    Shm,
+    ShmPool,
+    Buffer,
+    Surface,
+    Shell,
+    Toplevel,
+    Output,
+}
+
+/// Whether an operation travels from the client or to it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MessageKind {
+    Method,
+    Event,
+}
+
+/// Everything the wire needs to know about one operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OperationSpec {
+    pub interface: Interface,
+    pub kind: MessageKind,
+    pub opcode: u16,
+    pub name: &'static str,
+    pub payload: &'static [Field],
+}
+
+impl OperationSpec {
+    /// Total message size including the header, or `None` when the payload is variable-length.
+    #[must_use]
+    pub const fn message_size(&self) -> Option<usize> {
+        let mut total = HEADER_SIZE;
+        let mut index = 0;
+        while index < self.payload.len() {
+            match self.payload[index].size() {
+                Some(size) => total += size,
+                None => return None,
+            }
+            index += 1;
+        }
+        Some(total)
+    }
+}
+
+/// Every operation of every interface, named for the interface it belongs to.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Operation {
+    DisplaySync,
+    DisplayGetRegistry,
+    DisplayError,
+    DisplayDeleteId,
+    DisplaySyncDone,
+
+    RegistryBind,
+    RegistryGlobal,
+    RegistryGlobalRemove,
+
+    CompositorCreateSurface,
+
+    ShmCreatePool,
+    ShmFormat,
+
+    ShmPoolCreateBuffer,
+    ShmPoolResize,
+    ShmPoolDestroy,
+
+    BufferDestroy,
+    BufferRelease,
+
+    SurfaceDestroy,
+    SurfaceAttach,
+    SurfaceDamageBuffer,
+    SurfaceCommit,
+    SurfaceFrame,
+    SurfaceEnter,
+    SurfaceLeave,
+    SurfaceFrameDone,
+
+    ShellGetToplevel,
+
+    ToplevelDestroy,
+    ToplevelSetTitle,
+    ToplevelSetMinSize,
+    ToplevelSetMaxSize,
+    ToplevelConfigure,
+    ToplevelClose,
+
+    OutputGeometry,
+    OutputMode,
+    OutputScale,
+    OutputDone,
+}
+
+/// Shorthand for one table row.
+const fn spec(
+    interface: Interface,
+    kind: MessageKind,
+    opcode: u16,
+    name: &'static str,
+    payload: &'static [Field],
+) -> OperationSpec {
+    OperationSpec {
+        interface,
+        kind,
+        opcode,
+        name,
+        payload,
+    }
+}
+
+impl Operation {
+    /// The table row for this operation. Exhaustive, so an operation cannot exist without one.
+    #[must_use]
+    pub const fn spec(self) -> OperationSpec {
+        use Field::{I32, Object, String, U32, U64};
+        use Interface as I;
+        use MessageKind::{Event, Method};
+
+        match self {
+            Self::DisplaySync => spec(I::Display, Method, 0, "sync", &[U32]),
+            Self::DisplayGetRegistry => spec(I::Display, Method, 1, "get_registry", &[Object]),
+            Self::DisplayError => spec(I::Display, Event, 0, "error", &[Object, U32, String]),
+            Self::DisplayDeleteId => spec(I::Display, Event, 1, "delete_id", &[Object]),
+            Self::DisplaySyncDone => spec(I::Display, Event, 2, "sync_done", &[U32]),
+
+            Self::RegistryBind => spec(I::Registry, Method, 0, "bind", &[U32, U32, Object]),
+            Self::RegistryGlobal => spec(I::Registry, Event, 0, "global", &[U32, String, U32]),
+            Self::RegistryGlobalRemove => spec(I::Registry, Event, 1, "global_remove", &[U32]),
+
+            Self::CompositorCreateSurface => {
+                spec(I::Compositor, Method, 0, "create_surface", &[Object])
+            }
+
+            Self::ShmCreatePool => spec(
+                I::Shm,
+                Method,
+                0,
+                "create_pool",
+                &[Object, Field::Handle(HandleKind::SharedMemory), U32],
+            ),
+            Self::ShmFormat => spec(I::Shm, Event, 0, "format", &[U32]),
+
+            Self::ShmPoolCreateBuffer => spec(
+                I::ShmPool,
+                Method,
+                0,
+                "create_buffer",
+                &[Object, U32, U32, U32, U32, U32],
+            ),
+            Self::ShmPoolResize => spec(I::ShmPool, Method, 1, "resize", &[U32]),
+            Self::ShmPoolDestroy => spec(I::ShmPool, Method, 2, "destroy", &[]),
+
+            Self::BufferDestroy => spec(I::Buffer, Method, 0, "destroy", &[]),
+            Self::BufferRelease => spec(I::Buffer, Event, 0, "release", &[]),
+
+            Self::SurfaceDestroy => spec(I::Surface, Method, 0, "destroy", &[]),
+            Self::SurfaceAttach => spec(
+                I::Surface,
+                Method,
+                1,
+                "attach",
+                &[Object, Field::Handle(HandleKind::Fence), I32, I32],
+            ),
+            Self::SurfaceDamageBuffer => spec(
+                I::Surface,
+                Method,
+                2,
+                "damage_buffer",
+                &[I32, I32, U32, U32],
+            ),
+            Self::SurfaceCommit => spec(I::Surface, Method, 3, "commit", &[U64, U32]),
+            Self::SurfaceFrame => spec(I::Surface, Method, 4, "frame", &[U32]),
+            Self::SurfaceEnter => spec(I::Surface, Event, 0, "enter", &[Object]),
+            Self::SurfaceLeave => spec(I::Surface, Event, 1, "leave", &[Object]),
+            Self::SurfaceFrameDone => spec(I::Surface, Event, 2, "frame_done", &[U32, U64]),
+
+            Self::ShellGetToplevel => spec(I::Shell, Method, 0, "get_toplevel", &[Object, Object]),
+
+            Self::ToplevelDestroy => spec(I::Toplevel, Method, 0, "destroy", &[]),
+            Self::ToplevelSetTitle => spec(I::Toplevel, Method, 1, "set_title", &[String]),
+            Self::ToplevelSetMinSize => spec(I::Toplevel, Method, 2, "set_min_size", &[U32, U32]),
+            Self::ToplevelSetMaxSize => spec(I::Toplevel, Method, 3, "set_max_size", &[U32, U32]),
+            Self::ToplevelConfigure => {
+                spec(I::Toplevel, Event, 0, "configure", &[U32, U32, U32, U32])
+            }
+            Self::ToplevelClose => spec(I::Toplevel, Event, 1, "close", &[]),
+
+            Self::OutputGeometry => spec(I::Output, Event, 0, "geometry", &[U32, U32, U32]),
+            Self::OutputMode => spec(I::Output, Event, 1, "mode", &[U32, U32, U32, U32]),
+            Self::OutputScale => spec(I::Output, Event, 2, "scale", &[U32, U32]),
+            Self::OutputDone => spec(I::Output, Event, 3, "done", &[]),
+        }
+    }
+
+    #[must_use]
+    pub const fn interface(self) -> Interface {
+        self.spec().interface
+    }
+
+    #[must_use]
+    pub const fn kind(self) -> MessageKind {
+        self.spec().kind
+    }
+
+    #[must_use]
+    pub const fn opcode(self) -> u16 {
+        self.spec().opcode
+    }
+}
+
+impl Interface {
+    /// The interface's name on the wire, as the registry advertises it.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Display => "atria_display",
+            Self::Registry => "atria_registry",
+            Self::Compositor => "atria_compositor",
+            Self::Shm => "atria_shm",
+            Self::ShmPool => "atria_shm_pool",
+            Self::Buffer => "atria_buffer",
+            Self::Surface => "atria_surface",
+            Self::Shell => "atria_shell",
+            Self::Toplevel => "atria_toplevel",
+            Self::Output => "atria_output",
+        }
+    }
+
+    /// This interface's methods, in opcode order.
+    #[must_use]
+    pub const fn methods(self) -> &'static [Operation] {
+        use Operation as O;
+        match self {
+            Self::Display => &[O::DisplaySync, O::DisplayGetRegistry],
+            Self::Registry => &[O::RegistryBind],
+            Self::Compositor => &[O::CompositorCreateSurface],
+            Self::Shm => &[O::ShmCreatePool],
+            Self::ShmPool => &[O::ShmPoolCreateBuffer, O::ShmPoolResize, O::ShmPoolDestroy],
+            Self::Buffer => &[O::BufferDestroy],
+            Self::Surface => &[
+                O::SurfaceDestroy,
+                O::SurfaceAttach,
+                O::SurfaceDamageBuffer,
+                O::SurfaceCommit,
+                O::SurfaceFrame,
+            ],
+            Self::Shell => &[O::ShellGetToplevel],
+            Self::Toplevel => &[
+                O::ToplevelDestroy,
+                O::ToplevelSetTitle,
+                O::ToplevelSetMinSize,
+                O::ToplevelSetMaxSize,
+            ],
+            Self::Output => &[],
+        }
+    }
+
+    /// This interface's events, in opcode order.
+    #[must_use]
+    pub const fn events(self) -> &'static [Operation] {
+        use Operation as O;
+        match self {
+            Self::Display => &[O::DisplayError, O::DisplayDeleteId, O::DisplaySyncDone],
+            Self::Registry => &[O::RegistryGlobal, O::RegistryGlobalRemove],
+            Self::Compositor | Self::ShmPool | Self::Shell => &[],
+            Self::Shm => &[O::ShmFormat],
+            Self::Buffer => &[O::BufferRelease],
+            Self::Surface => &[O::SurfaceEnter, O::SurfaceLeave, O::SurfaceFrameDone],
+            Self::Toplevel => &[O::ToplevelConfigure, O::ToplevelClose],
+            Self::Output => &[
+                O::OutputGeometry,
+                O::OutputMode,
+                O::OutputScale,
+                O::OutputDone,
+            ],
+        }
+    }
+}
+
+/// Every interface the draw path defines.
+pub const INTERFACES: &[Interface] = &[
+    Interface::Display,
+    Interface::Registry,
+    Interface::Compositor,
+    Interface::Shm,
+    Interface::ShmPool,
+    Interface::Buffer,
+    Interface::Surface,
+    Interface::Shell,
+    Interface::Toplevel,
+    Interface::Output,
+];
