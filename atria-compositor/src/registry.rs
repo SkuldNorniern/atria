@@ -68,21 +68,11 @@ impl<T> ObjectRegistry<T> {
         self.allocate(id, kind, value)
     }
 
-    pub(crate) fn allocate_singleton(
-        &mut self,
-        id: ObjectId,
-        kind: ObjectKind,
-        value: T,
-    ) -> Result<(), StateError> {
-        if !id.is_reserved() || id == ObjectId::DISPLAY {
-            return Err(StateError::InvalidObjectId { object_id: id });
-        }
-        self.allocate(id, kind, value)
-    }
-
     fn allocate(&mut self, id: ObjectId, kind: ObjectKind, value: T) -> Result<(), StateError> {
-        // The draft has no delete-id acknowledgement. Reuse could make delayed messages
-        // alias a different object, so IDs remain retired until connection teardown.
+        // An identifier stays taken until the client has been told it was retired. Reusing one
+        // before that would let a message already in flight name a different object than the one
+        // its sender meant; `retire` is what closes that window, and it runs only after the
+        // compositor has queued the notification.
         if self.used.contains(&id) {
             return Err(StateError::ObjectIdAlreadyUsed { object_id: id });
         }

@@ -547,20 +547,38 @@ fn capability_revocation_event_precedes_reverse_order_object_destruction() {
 }
 
 #[test]
-fn reserved_ids_unknown_opcodes_and_wrong_types_are_typed_protocol_errors() {
+fn the_null_id_unknown_opcodes_and_wrong_types_are_typed_protocol_errors() {
     let mut state = state_with_limits(ConnectionLimits::default());
     let client = connect(&mut state);
     create_session(&mut state, client, 256);
-    let reserved = state.dispatch(
+    // Zero names nothing, so it is the one identifier a client may never allocate. Everything
+    // above the display is the client's to choose.
+    let null = state.dispatch(
         client,
         ClientRequest::CreateSurface {
             session: id(256),
-            new_id: id(3),
+            new_id: id(0),
+        },
+    );
+    assert_eq!(null, Err(StateError::InvalidObjectId { object_id: id(0) }));
+    assert!(!state.is_connected(client));
+
+    let client = connect(&mut state);
+    create_session(&mut state, client, 256);
+    // One is the display and is not the client's to allocate, so it is refused on the range
+    // rather than as a reuse — the client never owned it to reuse.
+    let display = state.dispatch(
+        client,
+        ClientRequest::CreateSurface {
+            session: id(256),
+            new_id: ObjectId::DISPLAY,
         },
     );
     assert_eq!(
-        reserved,
-        Err(StateError::InvalidObjectId { object_id: id(3) })
+        display,
+        Err(StateError::InvalidObjectId {
+            object_id: ObjectId::DISPLAY
+        })
     );
     assert!(!state.is_connected(client));
 

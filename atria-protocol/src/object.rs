@@ -1,13 +1,14 @@
 //! Connection-scoped protocol object identifiers.
+//!
+//! Zero is the null identifier, one is the display, and everything above is allocated by the
+//! client. There is no reserved band between them: a block of identifiers set aside for
+//! protocol-defined singletons only pays off if singletons keep being added, and every object
+//! after the display is created by a request that names its own identifier anyway.
 
-/// First identifier a client may allocate for a non-singleton object.
-pub const FIRST_CLIENT_ALLOCATED_ID: u32 = 256;
+/// First identifier a client may allocate.
+pub const FIRST_CLIENT_ALLOCATED_ID: u32 = 2;
 
 /// A connection-scoped protocol object identifier.
-///
-/// The draft reserves `1..=255` for protocol-defined singletons and starts client allocation
-/// at 256. It does not define the meaning of zero, so this type preserves zero rather than
-/// rejecting it or assigning it a meaning.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[repr(transparent)]
 pub struct ObjectId(u32);
@@ -28,13 +29,13 @@ impl ObjectId {
         self.0
     }
 
-    /// Whether this identifier lies in the protocol-reserved singleton range.
+    /// Whether this identifier names nothing.
     #[must_use]
-    pub const fn is_reserved(self) -> bool {
-        self.0 >= 1 && self.0 < FIRST_CLIENT_ALLOCATED_ID
+    pub const fn is_null(self) -> bool {
+        self.0 == 0
     }
 
-    /// Whether clients may allocate this identifier according to draft §4.
+    /// Whether a client may allocate this identifier.
     #[must_use]
     pub const fn is_client_allocatable(self) -> bool {
         self.0 >= FIRST_CLIENT_ALLOCATED_ID

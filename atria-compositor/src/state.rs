@@ -408,7 +408,7 @@ impl CompositorState {
     ) -> Result<(), StateError> {
         match request {
             ClientRequest::CreateRegistry { new_id } => {
-                self.allocate_singleton(connection, new_id, ObjectKind::Registry, Object::Registry)
+                self.allocate_client(connection, new_id, ObjectKind::Registry, Object::Registry)
             }
             ClientRequest::CreateSurface { session, new_id } => {
                 self.require_capability(connection, new_id, Capability::SurfaceCreate)?;
@@ -1368,21 +1368,6 @@ impl CompositorState {
             return Err(StateError::QuotaExceeded { object_id: id });
         }
         client.registry.allocate_client(id, kind, value)
-    }
-
-    fn allocate_singleton(
-        &mut self,
-        connection: ConnectionId,
-        id: ObjectId,
-        kind: ObjectKind,
-        value: Object,
-    ) -> Result<(), StateError> {
-        let limit = self.limits.max_objects;
-        let client = self.connection_mut(connection)?;
-        if client.registry.len() >= limit {
-            return Err(StateError::QuotaExceeded { object_id: id });
-        }
-        client.registry.allocate_singleton(id, kind, value)
     }
 
     fn expect_any(&self, connection: ConnectionId, id: ObjectId) -> Result<(), StateError> {

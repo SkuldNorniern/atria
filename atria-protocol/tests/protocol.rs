@@ -315,9 +315,12 @@ fn error_ranges_versions_objects_and_capabilities_follow_policy() {
         None
     );
 
-    assert!(ObjectId::from_raw(1).is_reserved());
-    assert!(!ObjectId::from_raw(0).is_reserved());
-    assert!(ObjectId::from_raw(256).is_client_allocatable());
+    // Zero names nothing, one is the display, and the client owns everything above it.
+    assert!(ObjectId::from_raw(0).is_null());
+    assert!(!ObjectId::from_raw(0).is_client_allocatable());
+    assert_eq!(ObjectId::DISPLAY, ObjectId::from_raw(1));
+    assert!(!ObjectId::DISPLAY.is_client_allocatable());
+    assert!(ObjectId::from_raw(2).is_client_allocatable());
 
     let freebsd = CapabilitySet::default_grants().with(Capability::SoftwareShm);
     assert!(freebsd.contains(Capability::SoftwareShm));
