@@ -12,6 +12,7 @@ extern crate alloc;
 mod binding;
 mod error;
 mod model;
+mod output;
 mod registry;
 mod resolve;
 mod state;
@@ -23,6 +24,9 @@ pub use model::{
     Event, EventKind, FORMAT_ARGB8888, FORMAT_RGB565, FORMAT_XRGB8888, FocusEvent, ObjectKind,
     Point, Rect, SeatCapabilities, SeatSnapshot, SessionSnapshot, Size, SurfaceKey, SurfaceRole,
     SurfaceSnapshot, pixel_format_is_known,
+};
+pub use output::{
+    IdentitySource, MAX_SCALE_TERM, OutputIdentity, OutputInfo, OutputSet, TopologyDelta,
 };
 pub use registry::{ObjectRegistry, Teardown};
 pub use resolve::{HandleResolver, ResolveError, SharedMemory};
