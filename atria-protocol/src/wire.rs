@@ -7,34 +7,74 @@ use crate::{DecodeError, EncodeError, ObjectId, Opcode};
 pub const HEADER_SIZE: usize = 12;
 pub const MAX_MESSAGE_SIZE: usize = 65_532;
 pub const MAX_PAYLOAD_SIZE: usize = MAX_MESSAGE_SIZE - HEADER_SIZE;
-pub const FD_PLACEHOLDER_BASE: u32 = 0xffff_ff00;
+pub const HANDLE_PLACEHOLDER_BASE: u32 = 0xffff_ff00;
+/// Slots a message's handle array can name.
+///
+/// A slot index is a `u8` and the reserved placeholder range runs to the top of the `u32` space.
+/// The assertion below is what keeps those two facts one fact: widening either without the other
+/// would leave placeholders that decode to a slot no array can hold, or slots no placeholder can
+/// name.
+pub const MAX_HANDLES_PER_MESSAGE: usize = u8::MAX as usize + 1;
+const _: () =
+    assert!(HANDLE_PLACEHOLDER_BASE as usize + MAX_HANDLES_PER_MESSAGE - 1 == u32::MAX as usize);
 
-/// Index of an fd in the message's out-of-band ancillary fd array.
+/// What a handle slot must name.
+///
+/// The kind is not on the wire. It is a property of the field being decoded — the fence slot of
+/// `surface.attach_with_fence` is a fence wherever that message appears — so encoding it would
+/// only invite a client to disagree with the message it sent. It travels in [`HandleIndex`] so
+/// that the transport, which is the only layer holding the actual object, can refuse a slot whose
+/// contents are the wrong kind.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(transparent)]
-pub struct FdIndex(u8);
+pub enum HandleKind {
+    SharedMemory,
+    GpuImage,
+    Fence,
+}
 
-impl FdIndex {
+/// A slot in the message's out-of-band handle array, and what must be in it.
+///
+/// The protocol does not say what a handle *is*. A Unix transport resolves a slot to a file
+/// descriptor received by `SCM_RIGHTS`; an Artery transport resolves it to a capability handle
+/// moved through a channel. Naming either here would make the wire format unspeakable on the
+/// other system.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HandleIndex {
+    index: u8,
+    kind: HandleKind,
+}
+
+impl HandleIndex {
     #[must_use]
-    pub const fn new(index: u8) -> Self {
-        Self(index)
+    pub const fn new(index: u8, kind: HandleKind) -> Self {
+        Self { index, kind }
     }
 
+    /// Which slot of the message's handle array this names.
     #[must_use]
-    pub const fn into_raw(self) -> u8 {
-        self.0
+    pub const fn slot(self) -> u8 {
+        self.index
+    }
+
+    /// What the transport must find in that slot.
+    #[must_use]
+    pub const fn kind(self) -> HandleKind {
+        self.kind
     }
 
     #[must_use]
     pub const fn placeholder(self) -> u32 {
-        FD_PLACEHOLDER_BASE + self.0 as u32
+        HANDLE_PLACEHOLDER_BASE + self.index as u32
     }
 
-    pub const fn from_placeholder(value: u32) -> Result<Self, DecodeError> {
-        if value >= FD_PLACEHOLDER_BASE {
-            Ok(Self((value - FD_PLACEHOLDER_BASE) as u8))
+    pub const fn from_placeholder(value: u32, kind: HandleKind) -> Result<Self, DecodeError> {
+        if value >= HANDLE_PLACEHOLDER_BASE {
+            Ok(Self {
+                index: (value - HANDLE_PLACEHOLDER_BASE) as u8,
+                kind,
+            })
         } else {
-            Err(DecodeError::InvalidFdPlaceholder { value })
+            Err(DecodeError::InvalidHandlePlaceholder { value })
         }
     }
 }
@@ -202,8 +242,8 @@ impl<'a> Encoder<'a> {
         self.write(&value.to_le_bytes())
     }
 
-    pub fn write_fd(&mut self, fd: FdIndex) -> Result<(), EncodeError> {
-        self.write_u32(fd.placeholder())
+    pub fn write_handle(&mut self, handle: HandleIndex) -> Result<(), EncodeError> {
+        self.write_u32(handle.placeholder())
     }
 
     /// Writes a u32 element count. Element encoding is interface-specific and the draft does
@@ -278,8 +318,9 @@ impl<'a> Decoder<'a> {
         Ok(i32::from_le_bytes(array))
     }
 
-    pub fn read_fd(&mut self) -> Result<FdIndex, DecodeError> {
-        FdIndex::from_placeholder(self.read_u32()?)
+    /// Reads a handle slot, tagged with the kind this field is defined to carry.
+    pub fn read_handle(&mut self, kind: HandleKind) -> Result<HandleIndex, DecodeError> {
+        HandleIndex::from_placeholder(self.read_u32()?, kind)
     }
 
     pub fn read_array_len(&mut self) -> Result<u32, DecodeError> {

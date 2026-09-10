@@ -1,7 +1,7 @@
 //! Payloads whose field layouts are explicitly specified by §§10, 12, and 17.
 
 use crate::error::ErrorCode;
-use crate::wire::{Decoder, Encoder, FdIndex, HEADER_SIZE, Header, padded_size};
+use crate::wire::{Decoder, Encoder, HEADER_SIZE, HandleIndex, HandleKind, Header, padded_size};
 use crate::{DecodeError, EncodeError, ObjectId, Opcode};
 
 /// An encodable protocol payload.
@@ -180,7 +180,7 @@ impl EncodePayload for RegistryGlobal<'_> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AttachWithFence {
     pub buffer_id: ObjectId,
-    pub fence_fd: FdIndex,
+    pub fence: HandleIndex,
     pub x_offset: i32,
     pub y_offset: i32,
 }
@@ -190,7 +190,7 @@ impl AttachWithFence {
         let mut decoder = Decoder::new(input);
         let value = Self {
             buffer_id: ObjectId::from_raw(decoder.read_u32()?),
-            fence_fd: decoder.read_fd()?,
+            fence: decoder.read_handle(HandleKind::Fence)?,
             x_offset: decoder.read_i32()?,
             y_offset: decoder.read_i32()?,
         };
@@ -206,7 +206,7 @@ impl EncodePayload for AttachWithFence {
 
     fn encode(&self, encoder: &mut Encoder<'_>) -> Result<(), EncodeError> {
         encoder.write_u32(self.buffer_id.into_raw())?;
-        encoder.write_fd(self.fence_fd)?;
+        encoder.write_handle(self.fence)?;
         encoder.write_i32(self.x_offset)?;
         encoder.write_i32(self.y_offset)
     }
@@ -215,14 +215,14 @@ impl EncodePayload for AttachWithFence {
 /// `buffer.release_with_fence` payload assigned in wire example 2.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ReleaseWithFence {
-    pub fence_fd: FdIndex,
+    pub fence: HandleIndex,
 }
 
 impl ReleaseWithFence {
     pub fn decode(input: &[u8]) -> Result<Self, DecodeError> {
         let mut decoder = Decoder::new(input);
         let value = Self {
-            fence_fd: decoder.read_fd()?,
+            fence: decoder.read_handle(HandleKind::Fence)?,
         };
         decoder.finish()?;
         Ok(value)
@@ -235,7 +235,7 @@ impl EncodePayload for ReleaseWithFence {
     }
 
     fn encode(&self, encoder: &mut Encoder<'_>) -> Result<(), EncodeError> {
-        encoder.write_fd(self.fence_fd)
+        encoder.write_handle(self.fence)
     }
 }
 

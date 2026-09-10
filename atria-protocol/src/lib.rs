@@ -18,3 +18,4 @@ pub mod wire;
 pub use error::{DecodeError, EncodeError};
 pub use object::ObjectId;
 pub use opcode::Opcode;
+pub use wire::{HandleIndex, HandleKind};

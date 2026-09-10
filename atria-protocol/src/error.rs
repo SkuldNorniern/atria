@@ -37,8 +37,8 @@ pub enum DecodeError {
     TrailingBytes { declared: usize, actual: usize },
     /// A string was not valid UTF-8.
     InvalidUtf8,
-    /// A field expected an fd placeholder but received another value.
-    InvalidFdPlaceholder { value: u32 },
+    /// A field expected a handle placeholder but received another value.
+    InvalidHandlePlaceholder { value: u32 },
     /// No specified operation has this opcode for the interface and message kind.
     UnknownOpcode {
         interface: Interface,
@@ -98,9 +98,9 @@ impl fmt::Display for DecodeError {
                 "packet contains {actual} bytes, but the message declares only {declared} bytes"
             ),
             Self::InvalidUtf8 => formatter.write_str("message string is not valid UTF-8"),
-            Self::InvalidFdPlaceholder { value } => write!(
+            Self::InvalidHandlePlaceholder { value } => write!(
                 formatter,
-                "file-descriptor field contains {value:#010x} instead of the required placeholder"
+                "handle field contains {value:#010x} instead of the required placeholder"
             ),
             Self::UnknownOpcode {
                 interface,

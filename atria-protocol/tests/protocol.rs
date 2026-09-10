@@ -8,7 +8,8 @@ use atria_protocol::message::{
 use atria_protocol::opcode::{Interface, MessageKind, Opcode, Operation, decode_operation};
 use atria_protocol::version::VersionRange;
 use atria_protocol::wire::{
-    Decoder, Encoder, FdIndex, Frame, HEADER_SIZE, MAX_MESSAGE_SIZE, MAX_PAYLOAD_SIZE, encode_frame,
+    Decoder, Encoder, Frame, HANDLE_PLACEHOLDER_BASE, HEADER_SIZE, HandleIndex, HandleKind,
+    MAX_MESSAGE_SIZE, MAX_PAYLOAD_SIZE, encode_frame,
 };
 use atria_protocol::{DecodeError, EncodeError, ObjectId};
 
@@ -62,7 +63,7 @@ fn string_codec_round_trips_lengths_and_unicode() {
 fn specified_messages_round_trip() {
     let attach = AttachWithFence {
         buffer_id: ObjectId::from_raw(700),
-        fence_fd: FdIndex::new(255),
+        fence: HandleIndex::new(255, HandleKind::Fence),
         x_offset: -17,
         y_offset: i32::MAX,
     };
@@ -204,9 +205,19 @@ fn malformed_strings_fds_and_trailing_payload_are_rejected() {
     let mut plain_integer = [0_u8; 4];
     plain_integer.copy_from_slice(&7_u32.to_le_bytes());
     assert_eq!(
-        Decoder::new(&plain_integer).read_fd(),
-        Err(DecodeError::InvalidFdPlaceholder { value: 7 })
+        Decoder::new(&plain_integer).read_handle(HandleKind::Fence),
+        Err(DecodeError::InvalidHandlePlaceholder { value: 7 })
     );
+
+    // The kind is the field's, not the sender's: a slot decodes as whatever the message says
+    // that field carries, and nothing in the payload can contradict it.
+    let mut slot = [0_u8; 4];
+    slot.copy_from_slice(&HANDLE_PLACEHOLDER_BASE.wrapping_add(9).to_le_bytes());
+    let handle = Decoder::new(&slot)
+        .read_handle(HandleKind::SharedMemory)
+        .expect("a placeholder decodes");
+    assert_eq!(handle.slot(), 9);
+    assert_eq!(handle.kind(), HandleKind::SharedMemory);
 
     let request_with_extra_field = [1_u8, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0];
     assert_eq!(
