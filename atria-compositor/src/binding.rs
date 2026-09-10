@@ -9,11 +9,12 @@
 //! unmodelled rather than guessed at.
 
 use atria_protocol::interface::{Interface, MessageKind, Operation, decode_operation};
-use atria_protocol::message::{AttachWithFence, GetRegistry};
-use atria_protocol::wire::Frame;
-use atria_protocol::{DecodeError, Opcode};
+use atria_protocol::message::{CreatePool, GetRegistry};
+use atria_protocol::wire::{Frame, HandleIndex};
+use atria_protocol::{DecodeError, ObjectId, Opcode};
 
-use crate::model::{ClientRequest, ObjectKind, Point};
+use crate::model::{ClientRequest, ObjectKind};
+use crate::resolve::{HandleResolver, ResolveError, SharedMemory};
 
 /// Which interface an object of this kind answers, when the draw path defines one.
 ///
@@ -28,6 +29,8 @@ pub const fn interface_of(kind: ObjectKind) -> Option<Interface> {
         ObjectKind::Registry => Some(Interface::Registry),
         ObjectKind::Surface => Some(Interface::Surface),
         ObjectKind::Buffer => Some(Interface::Buffer),
+        ObjectKind::Shm => Some(Interface::Shm),
+        ObjectKind::ShmPool => Some(Interface::ShmPool),
         ObjectKind::Seat | ObjectKind::Session | ObjectKind::Fence | ObjectKind::InputStream => {
             None
         }
@@ -57,12 +60,29 @@ impl From<DecodeError> for BindError {
     }
 }
 
-/// Bind one frame addressed to an object of `kind` to the request it carries.
+/// A request as the wire described it, with handle slots still unresolved.
+///
+/// The separate stage exists so decoding can be tested against bytes alone: nothing here has
+/// consulted a transport, so nothing here can fail for a reason the client is not responsible
+/// for.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DecodedRequest {
+    CreateRegistry {
+        new_id: ObjectId,
+    },
+    /// The pool's memory is still a slot in the message's handle array.
+    CreatePool {
+        new_id: ObjectId,
+        memory: HandleIndex,
+        size: u32,
+    },
+}
+
+/// Read one frame addressed to an object of `kind`. Performs no I/O and consults no transport.
 ///
 /// The caller supplies the kind because object identity is connection state, which this function
 /// deliberately does not hold.
-pub fn request_from_frame(kind: ObjectKind, frame: &Frame<'_>) -> Result<ClientRequest, BindError> {
-    let object = frame.header.object_id;
+pub fn decode(kind: ObjectKind, frame: &Frame<'_>) -> Result<DecodedRequest, BindError> {
     let opcode = frame.header.opcode;
     let Some(interface) = interface_of(kind) else {
         return Err(BindError::InterfaceUnassigned { kind });
@@ -74,26 +94,57 @@ pub fn request_from_frame(kind: ObjectKind, frame: &Frame<'_>) -> Result<ClientR
     match operation {
         Operation::DisplayGetRegistry => {
             let payload = GetRegistry::decode(frame.payload)?;
-            Ok(ClientRequest::CreateRegistry {
+            Ok(DecodedRequest::CreateRegistry {
                 new_id: payload.new_id,
             })
         }
-        Operation::SurfaceAttach => {
-            let payload = AttachWithFence::decode(frame.payload)?;
-            Ok(ClientRequest::Attach {
-                surface: object,
-                buffer: payload.buffer_id,
-                offset: Point {
-                    x: payload.x_offset,
-                    y: payload.y_offset,
-                },
-                // The slot is resolved by the transport, which holds the handle array. Until one
-                // exists there is nothing to resolve it against, so the fence is not yet bound.
-                acquire_fence: None,
+        Operation::ShmCreatePool => {
+            let payload = CreatePool::decode(frame.payload)?;
+            Ok(DecodedRequest::CreatePool {
+                new_id: payload.new_id,
+                memory: payload.memory,
+                size: payload.size,
             })
         }
         // Defined on the wire, with no request in the state machine yet. Each is a decode
         // waiting for the compositor to grow somewhere to put it.
         _ => Err(BindError::Unmodelled { operation }),
+    }
+}
+
+/// Turn the handle slots a decoded request names into the resources they stand for.
+///
+/// # Errors
+///
+/// Returns [`ResolveError`] when a slot is empty, holds the wrong kind of resource, or is too
+/// small for what the message says it holds. A request with no handles cannot fail here.
+pub fn resolve(
+    request: DecodedRequest,
+    handles: &impl HandleResolver,
+) -> Result<ClientRequest, ResolveError> {
+    match request {
+        DecodedRequest::CreateRegistry { new_id } => Ok(ClientRequest::CreateRegistry { new_id }),
+        DecodedRequest::CreatePool {
+            new_id,
+            memory,
+            size,
+        } => {
+            let resource = handles.shared_memory(memory)?;
+            // The message states how much of the resource the pool covers, and the resource
+            // states how much there is. Believing the message would let a client describe a pool
+            // larger than the memory behind it, and every buffer carved from it would be checked
+            // against a size that was never true.
+            if u64::from(size) > resource.size() {
+                return Err(ResolveError::TooSmall {
+                    slot: memory.slot(),
+                    needed: u64::from(size),
+                    actual: resource.size(),
+                });
+            }
+            Ok(ClientRequest::CreatePool {
+                new_id,
+                memory: SharedMemory::new(resource.id(), u64::from(size)),
+            })
+        }
     }
 }

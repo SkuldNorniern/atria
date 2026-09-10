@@ -4,6 +4,8 @@ use atria_protocol::ObjectId;
 use atria_protocol::capability::Capability;
 use atria_protocol::opcode::Opcode;
 
+use crate::resolve::SharedMemory;
+
 use crate::error::StateError;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -22,6 +24,9 @@ pub struct SurfaceKey {
 pub enum ObjectKind {
     Display,
     Registry,
+    /// The shared-memory factory a client binds from the registry.
+    Shm,
+    ShmPool,
     Seat,
     Session,
     Surface,
@@ -188,6 +193,11 @@ pub struct SessionSnapshot {
 pub enum ClientRequest {
     CreateRegistry {
         new_id: ObjectId,
+    },
+    /// Adopt a client's shared memory, already resolved from the handle slot that named it.
+    CreatePool {
+        new_id: ObjectId,
+        memory: SharedMemory,
     },
     CreateSurface {
         session: ObjectId,

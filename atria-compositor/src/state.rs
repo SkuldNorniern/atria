@@ -15,6 +15,7 @@ use crate::model::{
     SurfaceKey, SurfaceRole, SurfaceSnapshot,
 };
 use crate::registry::{ObjectRegistry, Teardown};
+use crate::resolve::SharedMemory;
 
 /// Bounds on the compositor as a whole, rather than on any one connection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -99,6 +100,7 @@ impl Error for NegotiationError {}
 enum Object {
     Display,
     Registry,
+    ShmPool(SharedMemory),
     Seat(SeatState),
     Session(SessionState),
     Surface(SurfaceState),
@@ -409,6 +411,16 @@ impl CompositorState {
         match request {
             ClientRequest::CreateRegistry { new_id } => {
                 self.allocate_client(connection, new_id, ObjectKind::Registry, Object::Registry)
+            }
+            ClientRequest::CreatePool { new_id, memory } => {
+                self.require_capability(connection, new_id, Capability::BufferImport)?;
+                self.check_kind_quota(connection, ObjectKind::ShmPool)?;
+                self.allocate_client(
+                    connection,
+                    new_id,
+                    ObjectKind::ShmPool,
+                    Object::ShmPool(memory),
+                )
             }
             ClientRequest::CreateSurface { session, new_id } => {
                 self.require_capability(connection, new_id, Capability::SurfaceCreate)?;
@@ -983,6 +995,19 @@ impl CompositorState {
             .map(|value| &value.snapshot)
     }
 
+    /// The memory a pool covers, as resolution validated it.
+    ///
+    /// Read rather than mapped: a buffer carved from this pool is checked against this size, and
+    /// the backend behind the resource decides when anything is mapped.
+    #[must_use]
+    pub fn pool_memory(&self, connection: ConnectionId, id: ObjectId) -> Option<SharedMemory> {
+        let entry = self.connections.get(&connection)?.registry.entry(id).ok()?;
+        match &entry.value {
+            Object::ShmPool(memory) => Some(*memory),
+            _ => None,
+        }
+    }
+
     /// What kind of object `id` is, for a caller binding a frame addressed to it.
     #[must_use]
     pub fn object_kind(&self, connection: ConnectionId, id: ObjectId) -> Option<ObjectKind> {
@@ -1350,6 +1375,9 @@ impl CompositorState {
                 .limits
                 .max_buffers
                 .min(self.limits.max_imported_handles),
+            // A pool is one handed-over resource, so it is bounded by the same allowance as the
+            // handles a connection may have imported.
+            ObjectKind::ShmPool => self.limits.max_imported_handles,
             _ => self.limits.max_objects,
         };
         if count >= maximum {
