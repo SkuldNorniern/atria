@@ -10,9 +10,9 @@ use atria_protocol::error::ErrorCategory;
 
 use crate::error::StateError;
 use crate::model::{
-    BufferDescriptor, BufferState, ClientRequest, CommitId, ConnectionId, Damage, Event, EventKind,
-    FocusEvent, ObjectKind, Point, Rect, SeatCapabilities, SeatSnapshot, SessionSnapshot,
-    SurfaceKey, SurfaceRole, SurfaceSnapshot,
+    BufferDescriptor, BufferState, BufferTransport, ClientRequest, CommitId, ConnectionId, Damage,
+    Event, EventKind, FocusEvent, ObjectKind, Point, Rect, SeatCapabilities, SeatSnapshot,
+    SessionSnapshot, Size, SurfaceKey, SurfaceRole, SurfaceSnapshot, pixel_format_is_known,
 };
 use crate::registry::{ObjectRegistry, Teardown};
 use crate::resolve::SharedMemory;
@@ -161,6 +161,13 @@ struct Connection {
     /// Events queued for this connection since the last drain, bounding what one client that
     /// stops reading can make the compositor hold.
     pending_events: usize,
+    /// The session this connection's surfaces belong to.
+    ///
+    /// A connection belongs to one session: the wire creates a surface through the compositor
+    /// global, which names no session, so the connection has to be what says which one. A client
+    /// does not choose a session per surface, and never did — the field on a surface only ever
+    /// held whatever its creator passed.
+    session: Option<ObjectId>,
     available_capabilities: CapabilitySet,
     capabilities: CapabilitySet,
     registry: ObjectRegistry<Object>,
@@ -253,6 +260,7 @@ impl CompositorState {
             id,
             Connection {
                 pending_events: 0,
+                session: None,
                 available_capabilities: available,
                 capabilities,
                 registry: ObjectRegistry::new(Object::Display),
@@ -346,12 +354,26 @@ impl CompositorState {
         if let Some(seat_id) = seat {
             self.expect_kind(connection, seat_id, ObjectKind::Seat)?;
         }
+        // One session per connection. A second would leave the compositor guessing which one a
+        // surface created through the compositor global belongs to, and guessing is what the
+        // wire having no session argument is meant to remove.
+        if self.connection(connection)?.session.is_some() {
+            return Err(StateError::InvalidState { object_id: id });
+        }
         self.allocate_client(
             connection,
             id,
             ObjectKind::Session,
             Object::Session(SessionState { seat, active }),
-        )
+        )?;
+        self.connection_mut(connection)?.session = Some(id);
+        Ok(())
+    }
+
+    /// The session this connection's surfaces belong to, if one has been established.
+    #[must_use]
+    pub fn session_of(&self, connection: ConnectionId) -> Option<ObjectId> {
+        self.connections.get(&connection)?.session
     }
 
     pub fn create_fence(
@@ -422,8 +444,11 @@ impl CompositorState {
                     Object::ShmPool(memory),
                 )
             }
-            ClientRequest::CreateSurface { session, new_id } => {
+            ClientRequest::CreateSurface { new_id } => {
                 self.require_capability(connection, new_id, Capability::SurfaceCreate)?;
+                let session = self
+                    .session_of(connection)
+                    .ok_or(StateError::InvalidState { object_id: new_id })?;
                 self.expect_active_session(connection, session)?;
                 self.check_kind_quota(connection, ObjectKind::Surface)?;
                 self.allocate_client(
@@ -440,6 +465,14 @@ impl CompositorState {
                     }),
                 )
             }
+            ClientRequest::CreateBuffer {
+                new_id,
+                pool,
+                offset,
+                size,
+                stride,
+                format,
+            } => self.create_buffer(connection, new_id, pool, offset, size, stride, format),
             ClientRequest::ImportBuffer { new_id, descriptor } => {
                 self.require_capability(connection, new_id, Capability::BufferImport)?;
                 self.require_capability(connection, new_id, descriptor.transport.capability())?;
@@ -1311,6 +1344,67 @@ impl CompositorState {
             });
         }
         self.expect_active_session(key.connection, surface.session)
+    }
+
+    /// Carve a buffer out of a pool, checking it lies inside the memory the pool covers.
+    ///
+    /// The pool's size came from the descriptor the client handed over, not from anything it
+    /// said, so this is the check that a buffer describes memory that exists. Without it a
+    /// client could name a region past the end of its own mapping and the compositor would read
+    /// it.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "every field is one wire argument of create_buffer, and grouping them into a                   struct would only move the same list somewhere the message does not describe"
+    )]
+    fn create_buffer(
+        &mut self,
+        connection: ConnectionId,
+        new_id: ObjectId,
+        pool: ObjectId,
+        offset: u32,
+        size: Size,
+        stride: u32,
+        format: u32,
+    ) -> Result<(), StateError> {
+        self.require_capability(connection, new_id, Capability::BufferImport)?;
+        let memory = self
+            .pool_memory(connection, pool)
+            .ok_or(StateError::WrongObjectType {
+                object_id: pool,
+                expected: ObjectKind::ShmPool,
+                actual: self
+                    .object_kind(connection, pool)
+                    .ok_or(StateError::InvalidObject { object_id: pool })?,
+            })?;
+
+        let descriptor = BufferDescriptor {
+            transport: BufferTransport::SoftwareShm,
+            size,
+            stride,
+            byte_len: u64::from(stride).saturating_mul(u64::from(size.height)),
+        };
+        if !descriptor.is_structurally_valid() || !pixel_format_is_known(format) {
+            return Err(StateError::InvalidState { object_id: new_id });
+        }
+        // Checked as one sum rather than two comparisons: a large offset and a large extent each
+        // fit on their own, and it is the total that has to be inside the pool.
+        let end = u64::from(offset)
+            .checked_add(descriptor.byte_len)
+            .ok_or(StateError::InvalidState { object_id: new_id })?;
+        if end > memory.size() {
+            return Err(StateError::InvalidState { object_id: new_id });
+        }
+
+        self.check_kind_quota(connection, ObjectKind::Buffer)?;
+        self.allocate_client(
+            connection,
+            new_id,
+            ObjectKind::Buffer,
+            Object::Buffer(BufferObject {
+                descriptor,
+                state: BufferState::Available,
+            }),
+        )
     }
 
     fn expect_active_session(

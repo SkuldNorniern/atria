@@ -83,6 +83,23 @@ pub enum Damage {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SurfaceRole(pub u32);
 
+/// Shared-memory pixel formats the draft names, and the only values `create_buffer` accepts.
+///
+/// Numbered here rather than inferred from a bytes-per-pixel count: a format is a layout and a
+/// colour interpretation, and two formats of one width are not interchangeable.
+pub const FORMAT_XRGB8888: u32 = 0;
+pub const FORMAT_ARGB8888: u32 = 1;
+pub const FORMAT_RGB565: u32 = 2;
+
+/// Whether the compositor knows what this format means.
+///
+/// An unknown value is refused rather than defaulted, per §12.4: guessing a layout would let a
+/// client and the compositor disagree about what the same bytes are.
+#[must_use]
+pub const fn pixel_format_is_known(format: u32) -> bool {
+    matches!(format, FORMAT_XRGB8888 | FORMAT_ARGB8888 | FORMAT_RGB565)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BufferTransport {
     SoftwareShm,
@@ -199,8 +216,18 @@ pub enum ClientRequest {
         new_id: ObjectId,
         memory: SharedMemory,
     },
+    /// Carve a buffer out of a pool the connection already holds.
+    CreateBuffer {
+        new_id: ObjectId,
+        pool: ObjectId,
+        offset: u32,
+        size: Size,
+        stride: u32,
+        format: u32,
+    },
+    /// The session is the connection's, not the request's: the wire creates a surface through
+    /// the compositor global, which names none.
     CreateSurface {
-        session: ObjectId,
         new_id: ObjectId,
     },
     ImportBuffer {

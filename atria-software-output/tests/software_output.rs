@@ -60,7 +60,6 @@ fn create_surface(state: &mut CompositorState, connection: ConnectionId, surface
         .dispatch(
             connection,
             ClientRequest::CreateSurface {
-                session: id(256),
                 new_id: id(surface),
             },
         )

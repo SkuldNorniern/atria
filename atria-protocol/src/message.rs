@@ -176,6 +176,177 @@ impl EncodePayload for RegistryGlobal<'_> {
     }
 }
 
+/// `atria_compositor.create_surface` and any other message whose payload is one new identifier.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NewId {
+    pub new_id: ObjectId,
+}
+
+impl NewId {
+    pub fn decode(input: &[u8]) -> Result<Self, DecodeError> {
+        let mut decoder = Decoder::new(input);
+        let value = Self {
+            new_id: ObjectId::from_raw(decoder.read_u32()?),
+        };
+        decoder.finish()?;
+        Ok(value)
+    }
+}
+
+impl EncodePayload for NewId {
+    fn encoded_len(&self) -> Result<usize, EncodeError> {
+        Ok(4)
+    }
+
+    fn encode(&self, encoder: &mut Encoder<'_>) -> Result<(), EncodeError> {
+        encoder.write_u32(self.new_id.into_raw())
+    }
+}
+
+/// `atria_shm_pool.create_buffer` payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CreateBuffer {
+    pub new_id: ObjectId,
+    pub offset: u32,
+    pub width: u32,
+    pub height: u32,
+    pub stride: u32,
+    pub format: u32,
+}
+
+impl CreateBuffer {
+    pub fn decode(input: &[u8]) -> Result<Self, DecodeError> {
+        let mut decoder = Decoder::new(input);
+        let value = Self {
+            new_id: ObjectId::from_raw(decoder.read_u32()?),
+            offset: decoder.read_u32()?,
+            width: decoder.read_u32()?,
+            height: decoder.read_u32()?,
+            stride: decoder.read_u32()?,
+            format: decoder.read_u32()?,
+        };
+        decoder.finish()?;
+        Ok(value)
+    }
+}
+
+impl EncodePayload for CreateBuffer {
+    fn encoded_len(&self) -> Result<usize, EncodeError> {
+        Ok(24)
+    }
+
+    fn encode(&self, encoder: &mut Encoder<'_>) -> Result<(), EncodeError> {
+        encoder.write_u32(self.new_id.into_raw())?;
+        encoder.write_u32(self.offset)?;
+        encoder.write_u32(self.width)?;
+        encoder.write_u32(self.height)?;
+        encoder.write_u32(self.stride)?;
+        encoder.write_u32(self.format)
+    }
+}
+
+/// `atria_surface.attach` payload. The buffer is null to unmap.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Attach {
+    pub buffer: ObjectId,
+    pub x_offset: i32,
+    pub y_offset: i32,
+}
+
+impl Attach {
+    pub fn decode(input: &[u8]) -> Result<Self, DecodeError> {
+        let mut decoder = Decoder::new(input);
+        let value = Self {
+            buffer: ObjectId::from_raw(decoder.read_u32()?),
+            x_offset: decoder.read_i32()?,
+            y_offset: decoder.read_i32()?,
+        };
+        decoder.finish()?;
+        Ok(value)
+    }
+}
+
+impl EncodePayload for Attach {
+    fn encoded_len(&self) -> Result<usize, EncodeError> {
+        Ok(12)
+    }
+
+    fn encode(&self, encoder: &mut Encoder<'_>) -> Result<(), EncodeError> {
+        encoder.write_u32(self.buffer.into_raw())?;
+        encoder.write_i32(self.x_offset)?;
+        encoder.write_i32(self.y_offset)
+    }
+}
+
+/// `atria_surface.damage_buffer` payload, in buffer pixels.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DamageBuffer {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl DamageBuffer {
+    pub fn decode(input: &[u8]) -> Result<Self, DecodeError> {
+        let mut decoder = Decoder::new(input);
+        let value = Self {
+            x: decoder.read_i32()?,
+            y: decoder.read_i32()?,
+            width: decoder.read_u32()?,
+            height: decoder.read_u32()?,
+        };
+        decoder.finish()?;
+        Ok(value)
+    }
+}
+
+impl EncodePayload for DamageBuffer {
+    fn encoded_len(&self) -> Result<usize, EncodeError> {
+        Ok(16)
+    }
+
+    fn encode(&self, encoder: &mut Encoder<'_>) -> Result<(), EncodeError> {
+        encoder.write_i32(self.x)?;
+        encoder.write_i32(self.y)?;
+        encoder.write_u32(self.width)?;
+        encoder.write_u32(self.height)
+    }
+}
+
+/// `atria_surface.commit` payload. `configure_serial` is zero when answering no configure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Commit {
+    pub commit_id: u64,
+    pub configure_serial: u32,
+}
+
+impl Commit {
+    pub fn decode(input: &[u8]) -> Result<Self, DecodeError> {
+        let mut decoder = Decoder::new(input);
+        let low = u64::from(decoder.read_u32()?);
+        let high = u64::from(decoder.read_u32()?);
+        let value = Self {
+            commit_id: low | (high << 32),
+            configure_serial: decoder.read_u32()?,
+        };
+        decoder.finish()?;
+        Ok(value)
+    }
+}
+
+impl EncodePayload for Commit {
+    fn encoded_len(&self) -> Result<usize, EncodeError> {
+        Ok(12)
+    }
+
+    fn encode(&self, encoder: &mut Encoder<'_>) -> Result<(), EncodeError> {
+        encoder.write_u32(self.commit_id as u32)?;
+        encoder.write_u32((self.commit_id >> 32) as u32)?;
+        encoder.write_u32(self.configure_serial)
+    }
+}
+
 /// `atria_shm.create_pool` payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CreatePool {

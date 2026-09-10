@@ -20,8 +20,9 @@ pub use binding::{BindError, DecodedRequest, decode, interface_of, resolve};
 pub use error::{ErrorCode, StateError};
 pub use model::{
     BufferDescriptor, BufferState, BufferTransport, ClientRequest, CommitId, ConnectionId, Damage,
-    Event, EventKind, FocusEvent, ObjectKind, Point, Rect, SeatCapabilities, SeatSnapshot,
-    SessionSnapshot, Size, SurfaceKey, SurfaceRole, SurfaceSnapshot,
+    Event, EventKind, FORMAT_ARGB8888, FORMAT_RGB565, FORMAT_XRGB8888, FocusEvent, ObjectKind,
+    Point, Rect, SeatCapabilities, SeatSnapshot, SessionSnapshot, Size, SurfaceKey, SurfaceRole,
+    SurfaceSnapshot, pixel_format_is_known,
 };
 pub use registry::{ObjectRegistry, Teardown};
 pub use resolve::{HandleResolver, ResolveError, SharedMemory};

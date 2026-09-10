@@ -6,9 +6,9 @@
 //! that proves the message.
 
 use atria_compositor::{
-    BindError, ClientRequest, CompositorState, ConnectionLimits, DecodedRequest, HandleResolver,
-    ObjectKind, ResolveError, ServerLimits, SharedMemory, StateError, decode, interface_of,
-    resolve,
+    BindError, ClientRequest, CompositorState, ConnectionLimits, DecodedRequest, FORMAT_XRGB8888,
+    HandleResolver, ObjectKind, ResolveError, ServerLimits, SharedMemory, Size, StateError, decode,
+    interface_of, pixel_format_is_known, resolve,
 };
 use atria_protocol::capability::{Capability, CapabilitySet};
 use atria_protocol::interface::{INTERFACES, Interface, MessageKind, Operation};
@@ -134,7 +134,18 @@ fn an_opcode_is_read_against_the_addressed_object_s_interface() {
 fn operations_the_wire_defines_and_the_state_machine_does_not_model_are_reported() {
     // Every method the draw path assigns, minus the two the compositor already accepts. Each is
     // fully specified on the wire and has nowhere to go yet.
-    let modelled = [Operation::DisplayGetRegistry, Operation::ShmCreatePool];
+    let modelled = [
+        Operation::DisplayGetRegistry,
+        Operation::ShmCreatePool,
+        Operation::ShmPoolCreateBuffer,
+        Operation::ShmPoolDestroy,
+        Operation::CompositorCreateSurface,
+        Operation::SurfaceAttach,
+        Operation::SurfaceDamageBuffer,
+        Operation::SurfaceCommit,
+        Operation::SurfaceDestroy,
+        Operation::BufferDestroy,
+    ];
 
     let mut checked = 0;
     for interface in INTERFACES {
@@ -187,9 +198,8 @@ fn an_event_opcode_is_never_bound_as_a_method() {
 
     assert_eq!(
         decode(ObjectKind::Surface, &frame),
-        Err(BindError::Unmodelled {
-            operation: Operation::SurfaceDestroy
-        })
+        Ok(DecodedRequest::Destroy { object: id(400) }),
+        "the number resolves to the method at zero, never to the event sharing it"
     );
 }
 
@@ -379,4 +389,135 @@ fn a_pool_records_the_resource_without_mapping_it() {
         .expect("the pool records its memory");
     assert_eq!(memory.id(), 77);
     assert_eq!(memory.size(), 512);
+}
+
+/// A buffer must lie inside the memory its pool covers. The pool's size came from the descriptor
+/// the client handed over, not from anything it said, so this is the check that a buffer
+/// describes memory that exists.
+#[test]
+fn a_buffer_past_the_end_of_its_pool_is_refused() {
+    let mut state = CompositorState::new(
+        CapabilitySet::default_grants().with(Capability::SoftwareShm),
+        ServerLimits::default(),
+        ConnectionLimits::default(),
+    );
+    let connection = state
+        .connect(CapabilitySet::default_grants(), CapabilitySet::empty())
+        .expect("baseline capabilities overlap");
+    state
+        .dispatch(
+            connection,
+            ClientRequest::CreatePool {
+                new_id: id(300),
+                memory: SharedMemory::new(1, 4096),
+            },
+        )
+        .expect("the pool is adopted");
+
+    // 64 x 64 at four bytes a pixel is 16384 bytes, four times the pool.
+    let refused = state.dispatch(
+        connection,
+        ClientRequest::CreateBuffer {
+            new_id: id(301),
+            pool: id(300),
+            offset: 0,
+            size: Size {
+                width: 64,
+                height: 64,
+            },
+            stride: 256,
+            format: FORMAT_XRGB8888,
+        },
+    );
+    assert_eq!(
+        refused,
+        Err(StateError::InvalidState { object_id: id(301) })
+    );
+}
+
+/// The offset and the extent are checked as one sum. Each fits on its own, and it is the total
+/// that has to be inside the pool.
+#[test]
+fn a_buffer_whose_offset_pushes_it_past_the_pool_is_refused() {
+    let mut state = CompositorState::new(
+        CapabilitySet::default_grants().with(Capability::SoftwareShm),
+        ServerLimits::default(),
+        ConnectionLimits::default(),
+    );
+    let connection = state
+        .connect(CapabilitySet::default_grants(), CapabilitySet::empty())
+        .expect("baseline capabilities overlap");
+    state
+        .dispatch(
+            connection,
+            ClientRequest::CreatePool {
+                new_id: id(300),
+                memory: SharedMemory::new(1, 4096),
+            },
+        )
+        .expect("the pool is adopted");
+
+    // 16 x 16 at four bytes is 1024 bytes: comfortably inside a 4096-byte pool on its own, and
+    // outside it starting at 3584.
+    let request = |offset| ClientRequest::CreateBuffer {
+        new_id: id(301),
+        pool: id(300),
+        offset,
+        size: Size {
+            width: 16,
+            height: 16,
+        },
+        stride: 64,
+        format: FORMAT_XRGB8888,
+    };
+
+    assert_eq!(
+        state.dispatch(connection, request(3584)),
+        Err(StateError::InvalidState { object_id: id(301) })
+    );
+    state
+        .dispatch(connection, request(3072))
+        .expect("the same buffer fits when it ends inside the pool");
+}
+
+/// An unknown pixel format is refused rather than defaulted, per §12.4: guessing a layout lets a
+/// client and the compositor disagree about what the same bytes are.
+#[test]
+fn an_unknown_pixel_format_is_refused() {
+    let mut state = CompositorState::new(
+        CapabilitySet::default_grants().with(Capability::SoftwareShm),
+        ServerLimits::default(),
+        ConnectionLimits::default(),
+    );
+    let connection = state
+        .connect(CapabilitySet::default_grants(), CapabilitySet::empty())
+        .expect("baseline capabilities overlap");
+    state
+        .dispatch(
+            connection,
+            ClientRequest::CreatePool {
+                new_id: id(300),
+                memory: SharedMemory::new(1, 4096),
+            },
+        )
+        .expect("the pool is adopted");
+
+    assert!(!pixel_format_is_known(0xdead));
+    assert_eq!(
+        state.dispatch(
+            connection,
+            ClientRequest::CreateBuffer {
+                new_id: id(301),
+                pool: id(300),
+                offset: 0,
+                size: Size {
+                    width: 8,
+                    height: 8,
+                },
+                stride: 32,
+                format: 0xdead,
+            },
+        ),
+        Err(StateError::InvalidState { object_id: id(301) })
+    );
 }

@@ -9,11 +9,13 @@
 //! unmodelled rather than guessed at.
 
 use atria_protocol::interface::{Interface, MessageKind, Operation, decode_operation};
-use atria_protocol::message::{CreatePool, GetRegistry};
+use atria_protocol::message::{
+    Attach, Commit, CreateBuffer, CreatePool, DamageBuffer, GetRegistry, NewId,
+};
 use atria_protocol::wire::{Frame, HandleIndex};
 use atria_protocol::{DecodeError, ObjectId, Opcode};
 
-use crate::model::{ClientRequest, ObjectKind};
+use crate::model::{ClientRequest, ObjectKind, Point, Rect, Size};
 use crate::resolve::{HandleResolver, ResolveError, SharedMemory};
 
 /// Which interface an object of this kind answers, when the draw path defines one.
@@ -76,6 +78,32 @@ pub enum DecodedRequest {
         memory: HandleIndex,
         size: u32,
     },
+    CreateBuffer {
+        new_id: ObjectId,
+        pool: ObjectId,
+        offset: u32,
+        size: Size,
+        stride: u32,
+        format: u32,
+    },
+    CreateSurface {
+        new_id: ObjectId,
+    },
+    Attach {
+        surface: ObjectId,
+        buffer: ObjectId,
+        offset: Point,
+    },
+    Damage {
+        surface: ObjectId,
+        rect: Rect,
+    },
+    Commit {
+        surface: ObjectId,
+    },
+    Destroy {
+        object: ObjectId,
+    },
 }
 
 /// Read one frame addressed to an object of `kind`. Performs no I/O and consults no transport.
@@ -83,6 +111,7 @@ pub enum DecodedRequest {
 /// The caller supplies the kind because object identity is connection state, which this function
 /// deliberately does not hold.
 pub fn decode(kind: ObjectKind, frame: &Frame<'_>) -> Result<DecodedRequest, BindError> {
+    let object = frame.header.object_id;
     let opcode = frame.header.opcode;
     let Some(interface) = interface_of(kind) else {
         return Err(BindError::InterfaceUnassigned { kind });
@@ -106,6 +135,60 @@ pub fn decode(kind: ObjectKind, frame: &Frame<'_>) -> Result<DecodedRequest, Bin
                 size: payload.size,
             })
         }
+        Operation::ShmPoolCreateBuffer => {
+            let payload = CreateBuffer::decode(frame.payload)?;
+            Ok(DecodedRequest::CreateBuffer {
+                new_id: payload.new_id,
+                pool: object,
+                offset: payload.offset,
+                size: Size {
+                    width: payload.width,
+                    height: payload.height,
+                },
+                stride: payload.stride,
+                format: payload.format,
+            })
+        }
+        Operation::CompositorCreateSurface => {
+            let payload = NewId::decode(frame.payload)?;
+            Ok(DecodedRequest::CreateSurface {
+                new_id: payload.new_id,
+            })
+        }
+        Operation::SurfaceAttach => {
+            let payload = Attach::decode(frame.payload)?;
+            Ok(DecodedRequest::Attach {
+                surface: object,
+                buffer: payload.buffer,
+                offset: Point {
+                    x: payload.x_offset,
+                    y: payload.y_offset,
+                },
+            })
+        }
+        Operation::SurfaceDamageBuffer => {
+            let payload = DamageBuffer::decode(frame.payload)?;
+            Ok(DecodedRequest::Damage {
+                surface: object,
+                rect: Rect {
+                    x: payload.x,
+                    y: payload.y,
+                    width: payload.width,
+                    height: payload.height,
+                },
+            })
+        }
+        Operation::SurfaceCommit => {
+            // `commit_id` and `configure_serial` decode and are not yet carried into the state
+            // machine: it assigns its own commit identifiers, and nothing sends a configure while
+            // no shell is attached. Both become fields the day a shell does.
+            let _ = Commit::decode(frame.payload)?;
+            Ok(DecodedRequest::Commit { surface: object })
+        }
+        Operation::SurfaceDestroy
+        | Operation::BufferDestroy
+        | Operation::ShmPoolDestroy
+        | Operation::ToplevelDestroy => Ok(DecodedRequest::Destroy { object }),
         // Defined on the wire, with no request in the state machine yet. Each is a decode
         // waiting for the compositor to grow somewhere to put it.
         _ => Err(BindError::Unmodelled { operation }),
@@ -124,6 +207,35 @@ pub fn resolve(
 ) -> Result<ClientRequest, ResolveError> {
     match request {
         DecodedRequest::CreateRegistry { new_id } => Ok(ClientRequest::CreateRegistry { new_id }),
+        DecodedRequest::CreateBuffer {
+            new_id,
+            pool,
+            offset,
+            size,
+            stride,
+            format,
+        } => Ok(ClientRequest::CreateBuffer {
+            new_id,
+            pool,
+            offset,
+            size,
+            stride,
+            format,
+        }),
+        DecodedRequest::CreateSurface { new_id } => Ok(ClientRequest::CreateSurface { new_id }),
+        DecodedRequest::Attach {
+            surface,
+            buffer,
+            offset,
+        } => Ok(ClientRequest::Attach {
+            surface,
+            buffer,
+            offset,
+            acquire_fence: None,
+        }),
+        DecodedRequest::Damage { surface, rect } => Ok(ClientRequest::Damage { surface, rect }),
+        DecodedRequest::Commit { surface } => Ok(ClientRequest::Commit { surface }),
+        DecodedRequest::Destroy { object } => Ok(ClientRequest::Destroy { object }),
         DecodedRequest::CreatePool {
             new_id,
             memory,

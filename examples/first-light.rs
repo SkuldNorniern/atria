@@ -179,7 +179,6 @@ fn main() -> Result<(), FirstLightError> {
         state.dispatch(
             connection,
             ClientRequest::CreateSurface {
-                session: id(256),
                 new_id: id(surface_id),
             },
         )?;

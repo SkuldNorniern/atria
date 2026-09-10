@@ -43,17 +43,11 @@ fn create_session(state: &mut CompositorState, connection: ConnectionId, raw: u3
         .unwrap_or_else(|error| panic!("session creation must succeed: {error:?}"));
 }
 
-fn create_surface(
-    state: &mut CompositorState,
-    connection: ConnectionId,
-    session: u32,
-    surface: u32,
-) {
+fn create_surface(state: &mut CompositorState, connection: ConnectionId, surface: u32) {
     state
         .dispatch(
             connection,
             ClientRequest::CreateSurface {
-                session: id(session),
                 new_id: id(surface),
             },
         )
@@ -105,7 +99,7 @@ fn client_cannot_reference_or_affect_another_clients_object() {
     let client_a = connect(&mut state);
     let client_b = connect(&mut state);
     create_session(&mut state, client_b, 256);
-    create_surface(&mut state, client_b, 256, 257);
+    create_surface(&mut state, client_b, 257);
     import_buffer(&mut state, client_b, 258);
     attach_and_commit(&mut state, client_b, 257, 258);
 
@@ -134,7 +128,7 @@ fn destroying_same_numeric_id_on_one_connection_does_not_touch_another() {
     let client_b = connect(&mut state);
     for client in [client_a, client_b] {
         create_session(&mut state, client, 256);
-        create_surface(&mut state, client, 256, 257);
+        create_surface(&mut state, client, 257);
         import_buffer(&mut state, client, 258);
     }
     attach_and_commit(&mut state, client_b, 257, 258);
@@ -162,7 +156,7 @@ fn a_destroyed_id_is_announced_as_retired_and_may_then_be_reused() {
     let mut state = state_with_limits(ConnectionLimits::default());
     let client = connect(&mut state);
     create_session(&mut state, client, 256);
-    create_surface(&mut state, client, 256, 257);
+    create_surface(&mut state, client, 257);
     let _ = state.take_events();
 
     state
@@ -185,13 +179,7 @@ fn a_destroyed_id_is_announced_as_retired_and_may_then_be_reused() {
     );
 
     state
-        .dispatch(
-            client,
-            ClientRequest::CreateSurface {
-                session: id(256),
-                new_id: id(257),
-            },
-        )
+        .dispatch(client, ClientRequest::CreateSurface { new_id: id(257) })
         .unwrap_or_else(|error| panic!("a retired identifier is allocatable again: {error:?}"));
     assert_eq!(
         state.object_kind(client, id(257)),
@@ -207,15 +195,9 @@ fn a_live_id_cannot_be_claimed_a_second_time() {
     let mut state = state_with_limits(ConnectionLimits::default());
     let client = connect(&mut state);
     create_session(&mut state, client, 256);
-    create_surface(&mut state, client, 256, 257);
+    create_surface(&mut state, client, 257);
 
-    let error = state.dispatch(
-        client,
-        ClientRequest::CreateSurface {
-            session: id(256),
-            new_id: id(257),
-        },
-    );
+    let error = state.dispatch(client, ClientRequest::CreateSurface { new_id: id(257) });
     assert_eq!(
         error,
         Err(StateError::ObjectIdAlreadyUsed { object_id: id(257) })
@@ -231,15 +213,9 @@ fn exceeding_per_connection_surface_quota_is_recoverable() {
     });
     let client = connect(&mut state);
     create_session(&mut state, client, 256);
-    create_surface(&mut state, client, 256, 257);
+    create_surface(&mut state, client, 257);
 
-    let result = state.dispatch(
-        client,
-        ClientRequest::CreateSurface {
-            session: id(256),
-            new_id: id(258),
-        },
-    );
+    let result = state.dispatch(client, ClientRequest::CreateSurface { new_id: id(258) });
     assert_eq!(
         result,
         Err(StateError::QuotaExceeded {
@@ -254,7 +230,7 @@ fn commit_before_attach_is_an_object_error_and_destroys_only_surface() {
     let mut state = state_with_limits(ConnectionLimits::default());
     let client = connect(&mut state);
     create_session(&mut state, client, 256);
-    create_surface(&mut state, client, 256, 257);
+    create_surface(&mut state, client, 257);
 
     let result = state.dispatch(client, ClientRequest::Commit { surface: id(257) });
 
@@ -283,7 +259,7 @@ fn connection_teardown_destroys_everything_in_reverse_creation_order() {
     state
         .create_session(client, id(257), Some(id(256)), true)
         .expect("session creation");
-    create_surface(&mut state, client, 257, 258);
+    create_surface(&mut state, client, 258);
     import_buffer(&mut state, client, 259);
 
     let teardown = state.close_connection(client);
@@ -306,7 +282,7 @@ fn pending_surface_state_does_not_replace_current_until_commit() {
     let mut state = state_with_limits(ConnectionLimits::default());
     let client = connect(&mut state);
     create_session(&mut state, client, 256);
-    create_surface(&mut state, client, 256, 257);
+    create_surface(&mut state, client, 257);
     import_buffer(&mut state, client, 258);
     import_buffer(&mut state, client, 259);
     attach_and_commit(&mut state, client, 257, 258);
@@ -386,7 +362,7 @@ fn keyboard_focus_change_orders_leave_before_enter_atomically() {
     let client = connect(&mut state);
     create_session(&mut state, client, 256);
     for (surface, buffer, x) in [(257, 259, 0), (258, 260, 25)] {
-        create_surface(&mut state, client, 256, surface);
+        create_surface(&mut state, client, surface);
         import_buffer(&mut state, client, buffer);
         attach_and_commit(&mut state, client, surface, buffer);
         state
@@ -435,7 +411,7 @@ fn pointer_target_uses_topmost_surface_under_pointer() {
     let client = connect(&mut state);
     create_session(&mut state, client, 256);
     for (surface, buffer) in [(257, 259), (258, 260)] {
-        create_surface(&mut state, client, 256, surface);
+        create_surface(&mut state, client, surface);
         import_buffer(&mut state, client, buffer);
         attach_and_commit(&mut state, client, surface, buffer);
         state
@@ -511,7 +487,7 @@ fn acquire_fence_blocks_presentation_until_signaled() {
         .connect(capabilities, CapabilitySet::empty())
         .expect("capabilities overlap");
     create_session(&mut state, client, 256);
-    create_surface(&mut state, client, 256, 257);
+    create_surface(&mut state, client, 257);
     import_buffer(&mut state, client, 258);
     state.create_fence(client, id(259)).expect("fence object");
     state
@@ -548,7 +524,7 @@ fn second_consecutive_deadline_miss_emits_frame_late_once() {
     let mut state = state_with_limits(ConnectionLimits::default());
     let client = connect(&mut state);
     create_session(&mut state, client, 256);
-    create_surface(&mut state, client, 256, 257);
+    create_surface(&mut state, client, 257);
     let surface = SurfaceKey {
         connection: client,
         object_id: id(257),
@@ -567,8 +543,8 @@ fn capability_revocation_event_precedes_reverse_order_object_destruction() {
     let mut state = state_with_limits(ConnectionLimits::default());
     let client = connect(&mut state);
     create_session(&mut state, client, 256);
-    create_surface(&mut state, client, 256, 257);
-    create_surface(&mut state, client, 256, 258);
+    create_surface(&mut state, client, 257);
+    create_surface(&mut state, client, 258);
     state.take_events();
 
     let destroyed = state
@@ -599,13 +575,7 @@ fn the_null_id_unknown_opcodes_and_wrong_types_are_typed_protocol_errors() {
     create_session(&mut state, client, 256);
     // Zero names nothing, so it is the one identifier a client may never allocate. Everything
     // above the display is the client's to choose.
-    let null = state.dispatch(
-        client,
-        ClientRequest::CreateSurface {
-            session: id(256),
-            new_id: id(0),
-        },
-    );
+    let null = state.dispatch(client, ClientRequest::CreateSurface { new_id: id(0) });
     assert_eq!(null, Err(StateError::InvalidObjectId { object_id: id(0) }));
     assert!(!state.is_connected(client));
 
@@ -616,7 +586,6 @@ fn the_null_id_unknown_opcodes_and_wrong_types_are_typed_protocol_errors() {
     let display = state.dispatch(
         client,
         ClientRequest::CreateSurface {
-            session: id(256),
             new_id: ObjectId::DISPLAY,
         },
     );
@@ -776,13 +745,7 @@ fn closing_a_connection_reports_its_objects_without_queuing_events_for_it() {
     let client = connect(&mut state);
     create_session(&mut state, client, 256);
     state
-        .dispatch(
-            client,
-            ClientRequest::CreateSurface {
-                session: id(256),
-                new_id: id(257),
-            },
-        )
+        .dispatch(client, ClientRequest::CreateSurface { new_id: id(257) })
         .unwrap_or_else(|error| panic!("surface creation must succeed: {error:?}"));
     let _ = state.take_events();
 

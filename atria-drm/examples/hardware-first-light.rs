@@ -151,13 +151,7 @@ fn main() -> Result<(), HardwareFirstLightError> {
     );
     let connection = state.connect(capabilities, capabilities)?;
     state.create_session(connection, id(256), None, true)?;
-    state.dispatch(
-        connection,
-        ClientRequest::CreateSurface {
-            session: id(256),
-            new_id: id(257),
-        },
-    )?;
+    state.dispatch(connection, ClientRequest::CreateSurface { new_id: id(257) })?;
     let surface = SurfaceKey {
         connection,
         object_id: id(257),
