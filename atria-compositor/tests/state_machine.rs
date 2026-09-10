@@ -595,6 +595,7 @@ fn arbitrary_decoded_requests_return_errors_without_panicking() {
                 max_buffers: 2,
                 max_imported_handles: 2,
                 max_damage_rects_per_commit: 2,
+                max_pending_events: 8,
             });
             let client = connect(&mut state);
             let object = id(seed);
@@ -657,5 +658,80 @@ fn connections_past_the_server_limit_are_refused_rather_than_accepted() {
     assert_eq!(
         state.connect(software_capabilities(), CapabilitySet::empty()),
         Err(NegotiationError::ConnectionLimitReached { limit })
+    );
+}
+
+/// A shared outgoing queue is memory every other connection lives beside, so one client that
+/// stops reading must not be able to grow it. Reaching the bound is not a protocol violation —
+/// the client sent nothing wrong — so it produces a resource error and a close.
+#[test]
+fn a_connection_that_stops_reading_events_is_disconnected_not_grown() {
+    let limit = 4;
+    let mut state = state_with_limits(ConnectionLimits {
+        max_pending_events: limit,
+        ..ConnectionLimits::default()
+    });
+    let client = connect(&mut state);
+    create_session(&mut state, client, 256);
+
+    // Revoking a capability no object holds emits exactly one event per call and destroys
+    // nothing, so the only bound this exercises is the one under test.
+    for _ in 0..limit {
+        let _ = state.revoke_capability(client, Capability::Screencopy);
+    }
+    assert!(
+        state.is_connected(client),
+        "the bound itself is not an error"
+    );
+
+    let _ = state.revoke_capability(client, Capability::Screencopy);
+    assert!(
+        !state.is_connected(client),
+        "a connection past its event bound is closed"
+    );
+
+    let events = state.take_events();
+    let overflow = events
+        .iter()
+        .rev()
+        .find_map(|event| match event.kind {
+            EventKind::Error(error) => Some(error),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the client is told why it was disconnected"));
+    assert_eq!(overflow, StateError::EventQueueOverflow { queued: limit });
+    assert_eq!(overflow.category(), ErrorCategory::Resource);
+}
+
+/// Closing a connection used to queue one destroy event per object it held — up to
+/// `max_objects` of them, addressed to a connection that had just been removed and so could
+/// never receive them. `Teardown` already carries that list to the caller.
+#[test]
+fn closing_a_connection_reports_its_objects_without_queuing_events_for_it() {
+    let mut state = state_with_limits(ConnectionLimits::default());
+    let client = connect(&mut state);
+    create_session(&mut state, client, 256);
+    state
+        .dispatch(
+            client,
+            ClientRequest::CreateSurface {
+                session: id(256),
+                new_id: id(257),
+            },
+        )
+        .unwrap_or_else(|error| panic!("surface creation must succeed: {error:?}"));
+    let _ = state.take_events();
+
+    let teardown = state.close_connection(client);
+    assert!(
+        teardown
+            .destroyed
+            .iter()
+            .any(|(id, _)| id.into_raw() == 257),
+        "the caller is told what the connection held"
+    );
+    assert!(
+        state.take_events().is_empty(),
+        "nothing is queued for a connection that has been removed"
     );
 }

@@ -40,6 +40,9 @@ pub struct ConnectionLimits {
     pub max_buffers: usize,
     pub max_imported_handles: usize,
     pub max_damage_rects_per_commit: usize,
+    /// Events one connection may have waiting between drains. A connection that reaches it is
+    /// not reading, and is disconnected rather than allowed to grow the compositor's memory.
+    pub max_pending_events: usize,
 }
 
 impl Default for ConnectionLimits {
@@ -52,6 +55,7 @@ impl Default for ConnectionLimits {
             // represents one already-validated handle at this layer.
             max_imported_handles: 64,
             max_damage_rects_per_commit: 256,
+            max_pending_events: 256,
         }
     }
 }
@@ -152,6 +156,9 @@ struct FenceState {
 
 #[derive(Clone, Debug)]
 struct Connection {
+    /// Events queued for this connection since the last drain, bounding what one client that
+    /// stops reading can make the compositor hold.
+    pending_events: usize,
     available_capabilities: CapabilitySet,
     capabilities: CapabilitySet,
     registry: ObjectRegistry<Object>,
@@ -243,6 +250,7 @@ impl CompositorState {
         self.connections.insert(
             id,
             Connection {
+                pending_events: 0,
                 available_capabilities: available,
                 capabilities,
                 registry: ObjectRegistry::new(Object::Display),
@@ -291,12 +299,12 @@ impl CompositorState {
             return Err(StateError::ConnectionClosed);
         };
         client.capabilities = client.capabilities.without(capability);
-        self.events.push(Event {
-            connection,
-            object_id: ObjectId::DISPLAY,
-            kind: EventKind::CapabilityRevoked(capability),
-        });
         let ids: Vec<_> = client.registry.ids_reverse_creation().collect();
+        self.push_event(
+            connection,
+            ObjectId::DISPLAY,
+            EventKind::CapabilityRevoked(capability),
+        );
         let mut destroyed = Vec::new();
         for id in ids {
             if self.object_requires(connection, id, capability) {
@@ -378,11 +386,7 @@ impl CompositorState {
         }
         let result = self.dispatch_checked(connection, request);
         if let Err(error) = result {
-            self.events.push(Event {
-                connection,
-                object_id: error.object_id(),
-                kind: EventKind::Error(error),
-            });
+            self.push_event(connection, error.object_id(), EventKind::Error(error));
             match error.category() {
                 ErrorCategory::Protocol => {
                     let _ = self.close_connection(connection);
@@ -681,19 +685,15 @@ impl CompositorState {
             );
             if release {
                 self.set_buffer_state(surface.connection, id, BufferState::Available)?;
-                self.events.push(Event {
-                    connection: surface.connection,
-                    object_id: id,
-                    kind: EventKind::BufferRelease,
-                });
+                self.push_event(surface.connection, id, EventKind::BufferRelease);
             }
         }
         if callback {
-            self.events.push(Event {
-                connection: surface.connection,
-                object_id: surface.object_id,
-                kind: EventKind::FrameDone { timestamp_ns },
-            });
+            self.push_event(
+                surface.connection,
+                surface.object_id,
+                EventKind::FrameDone { timestamp_ns },
+            );
             if let Some(current) = self
                 .surface_mut(surface.connection, surface.object_id)?
                 .current
@@ -755,11 +755,7 @@ impl CompositorState {
             return Err(StateError::InvalidState { object_id: buffer });
         }
         self.set_buffer_state(connection, buffer, BufferState::Available)?;
-        self.events.push(Event {
-            connection,
-            object_id: buffer,
-            kind: EventKind::BufferRelease,
-        });
+        self.push_event(connection, buffer, EventKind::BufferRelease);
         Ok(())
     }
 
@@ -778,11 +774,11 @@ impl CompositorState {
             return Err(StateError::InvalidState { object_id: buffer });
         }
         self.set_buffer_state(connection, buffer, BufferState::Available)?;
-        self.events.push(Event {
+        self.push_event(
             connection,
-            object_id: buffer,
-            kind: EventKind::BufferReleaseWithFence { fence },
-        });
+            buffer,
+            EventKind::BufferReleaseWithFence { fence },
+        );
         Ok(())
     }
 
@@ -798,14 +794,14 @@ impl CompositorState {
                 object_id: surface.object_id,
             });
         }
-        self.events.push(Event {
-            connection: surface.connection,
-            object_id: surface.object_id,
-            kind: EventKind::FrameDeadline {
+        self.push_event(
+            surface.connection,
+            surface.object_id,
+            EventKind::FrameDeadline {
                 deadline_ns,
                 refresh_interval_ns,
             },
-        });
+        );
         Ok(())
     }
 
@@ -813,11 +809,7 @@ impl CompositorState {
         let state = self.surface_mut(surface.connection, surface.object_id)?;
         state.consecutive_deadline_misses = state.consecutive_deadline_misses.saturating_add(1);
         if state.consecutive_deadline_misses == 2 {
-            self.events.push(Event {
-                connection: surface.connection,
-                object_id: surface.object_id,
-                kind: EventKind::FrameLate,
-            });
+            self.push_event(surface.connection, surface.object_id, EventKind::FrameLate);
         }
         Ok(())
     }
@@ -907,19 +899,11 @@ impl CompositorState {
         let mut events = Vec::with_capacity(2);
         if let Some(old) = self.keyboard_focus {
             events.push(FocusEvent::KeyboardLeave(old));
-            self.events.push(Event {
-                connection: old.connection,
-                object_id: old.object_id,
-                kind: EventKind::KeyboardLeave,
-            });
+            self.push_event(old.connection, old.object_id, EventKind::KeyboardLeave);
         }
         if let Some(new) = new_focus {
             events.push(FocusEvent::KeyboardEnter(new));
-            self.events.push(Event {
-                connection: new.connection,
-                object_id: new.object_id,
-                kind: EventKind::KeyboardEnter,
-            });
+            self.push_event(new.connection, new.object_id, EventKind::KeyboardEnter);
         }
         self.keyboard_focus = new_focus;
         Ok(events)
@@ -944,11 +928,7 @@ impl CompositorState {
             }) {
                 if let Some(old) = self.keyboard_focus {
                     focus_events.push(FocusEvent::KeyboardLeave(old));
-                    self.events.push(Event {
-                        connection: old.connection,
-                        object_id: old.object_id,
-                        kind: EventKind::KeyboardLeave,
-                    });
+                    self.push_event(old.connection, old.object_id, EventKind::KeyboardLeave);
                 }
                 self.keyboard_focus = None;
             }
@@ -1059,7 +1039,41 @@ impl CompositorState {
             .map(|value| value.descriptor)
     }
 
+    /// Queue one event for a connection, or disconnect a connection that has stopped reading.
+    ///
+    /// The outgoing queue is shared, so a client that never drains would otherwise grow memory
+    /// every other connection has to live beside. Reaching the bound is not a protocol violation
+    /// — the client sent nothing wrong — so it produces a resource error and a close rather than
+    /// being treated as a bad message. The error itself bypasses the bound, because a client
+    /// being disconnected has to be told why.
+    fn push_event(&mut self, connection: ConnectionId, object_id: ObjectId, kind: EventKind) {
+        let Some(client) = self.connections.get_mut(&connection) else {
+            // Nothing to deliver to. The only events addressed to a departed connection are the
+            // ones its own teardown would produce, and `close_connection` returns those instead.
+            return;
+        };
+        if client.pending_events >= self.limits.max_pending_events {
+            let queued = client.pending_events;
+            self.events.push(Event {
+                connection,
+                object_id: ObjectId::DISPLAY,
+                kind: EventKind::Error(StateError::EventQueueOverflow { queued }),
+            });
+            let _ = self.close_connection(connection);
+            return;
+        }
+        client.pending_events += 1;
+        self.events.push(Event {
+            connection,
+            object_id,
+            kind,
+        });
+    }
+
     pub fn take_events(&mut self) -> Vec<Event> {
+        for client in self.connections.values_mut() {
+            client.pending_events = 0;
+        }
         take(&mut self.events)
     }
 
@@ -1072,11 +1086,6 @@ impl CompositorState {
         for id in ids {
             if let Some(entry) = client.registry.remove(id) {
                 destroyed.push((id, entry.kind));
-                self.events.push(Event {
-                    connection,
-                    object_id: id,
-                    kind: EventKind::ObjectDestroyed(entry.kind),
-                });
             }
         }
         self.scene
@@ -1168,21 +1177,13 @@ impl CompositorState {
                 });
                 if related {
                     let _ = self.set_buffer_state(connection, buffer_id, BufferState::Available);
-                    self.events.push(Event {
-                        connection,
-                        object_id: buffer_id,
-                        kind: EventKind::BufferRelease,
-                    });
+                    self.push_event(connection, buffer_id, EventKind::BufferRelease);
                 }
             }
             self.scene.positions.remove(&key);
             self.scene.stack.retain(|value| *value != key);
             if self.keyboard_focus == Some(key) {
-                self.events.push(Event {
-                    connection,
-                    object_id,
-                    kind: EventKind::KeyboardLeave,
-                });
+                self.push_event(connection, object_id, EventKind::KeyboardLeave);
                 self.keyboard_focus = None;
             }
             if self.pointer_target == Some(key) {
@@ -1238,11 +1239,7 @@ impl CompositorState {
         if let Some(client) = self.connections.get_mut(&connection) {
             if client.registry.remove(object_id).is_some() {
                 destroyed.push((object_id, kind));
-                self.events.push(Event {
-                    connection,
-                    object_id,
-                    kind: EventKind::ObjectDestroyed(kind),
-                });
+                self.push_event(connection, object_id, EventKind::ObjectDestroyed(kind));
             }
         }
     }
