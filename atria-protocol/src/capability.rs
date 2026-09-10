@@ -20,8 +20,21 @@ pub enum Capability {
 }
 
 impl Capability {
-    const fn mask(self) -> u16 {
-        1_u16 << (self as u8)
+    /// The bit this capability occupies in [`CapabilitySet`].
+    ///
+    /// The width was chosen while the set had no wire form at all and could still be picked
+    /// freely; the authority the shell role needs — shell control, output control, capture,
+    /// global input observation, input injection, session control, lock screen — did not fit the
+    /// sixteen bits this used to have. The bound is checked here rather than beside the list,
+    /// because this shift is the only place outgrowing it would do damage, and a capability past
+    /// the sixty-fourth would otherwise shift straight out of the set and read as absent.
+    const fn mask(self) -> u64 {
+        let index = self as u32;
+        assert!(
+            index < u64::BITS,
+            "capability index outside the set's width"
+        );
+        1_u64 << index
     }
 
     /// Returns the spelling used by the specification or ADR.
@@ -50,7 +63,7 @@ impl Capability {
 /// This bitset is an in-memory API, not a wire representation. ADR-0012 requires a versioned
 /// capability set but does not assign numeric capability IDs or define its payload encoding.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct CapabilitySet(u16);
+pub struct CapabilitySet(u64);
 
 impl CapabilitySet {
     #[must_use]
