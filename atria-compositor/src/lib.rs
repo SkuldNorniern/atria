@@ -13,9 +13,10 @@ mod binding;
 mod error;
 mod model;
 mod registry;
+mod resolve;
 mod state;
 
-pub use binding::{BindError, interface_of, request_from_frame};
+pub use binding::{BindError, DecodedRequest, decode, interface_of, resolve};
 pub use error::{ErrorCode, StateError};
 pub use model::{
     BufferDescriptor, BufferState, BufferTransport, ClientRequest, CommitId, ConnectionId, Damage,
@@ -23,4 +24,5 @@ pub use model::{
     SessionSnapshot, Size, SurfaceKey, SurfaceRole, SurfaceSnapshot,
 };
 pub use registry::{ObjectRegistry, Teardown};
+pub use resolve::{HandleResolver, ResolveError, SharedMemory};
 pub use state::{CompositorState, ConnectionLimits, NegotiationError, ServerLimits};
