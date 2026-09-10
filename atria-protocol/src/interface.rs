@@ -131,6 +131,7 @@ pub enum Operation {
     ToplevelConfigure,
     ToplevelClose,
 
+    OutputIdentity,
     OutputGeometry,
     OutputMode,
     OutputScale,
@@ -225,10 +226,11 @@ impl Operation {
             }
             Self::ToplevelClose => spec(I::Toplevel, Event, 1, "close", &[]),
 
-            Self::OutputGeometry => spec(I::Output, Event, 0, "geometry", &[U32, U32, U32]),
-            Self::OutputMode => spec(I::Output, Event, 1, "mode", &[U32, U32, U32, U32]),
-            Self::OutputScale => spec(I::Output, Event, 2, "scale", &[U32, U32]),
-            Self::OutputDone => spec(I::Output, Event, 3, "done", &[]),
+            Self::OutputIdentity => spec(I::Output, Event, 0, "identity", &[U64, U64]),
+            Self::OutputGeometry => spec(I::Output, Event, 1, "geometry", &[U32, U32, U32]),
+            Self::OutputMode => spec(I::Output, Event, 2, "mode", &[U32, U32, U32, U32]),
+            Self::OutputScale => spec(I::Output, Event, 3, "scale", &[U32, U32]),
+            Self::OutputDone => spec(I::Output, Event, 4, "done", &[]),
         }
     }
 
@@ -308,6 +310,7 @@ impl Interface {
             Self::Surface => &[O::SurfaceEnter, O::SurfaceLeave, O::SurfaceFrameDone],
             Self::Toplevel => &[O::ToplevelConfigure, O::ToplevelClose],
             Self::Output => &[
+                O::OutputIdentity,
                 O::OutputGeometry,
                 O::OutputMode,
                 O::OutputScale,
