@@ -200,13 +200,7 @@ impl Operation {
             Self::BufferRelease => spec(I::Buffer, Event, 0, "release", &[]),
 
             Self::SurfaceDestroy => spec(I::Surface, Method, 0, "destroy", &[]),
-            Self::SurfaceAttach => spec(
-                I::Surface,
-                Method,
-                1,
-                "attach",
-                &[Object, Field::Handle(HandleKind::Fence), I32, I32],
-            ),
+            Self::SurfaceAttach => spec(I::Surface, Method, 1, "attach", &[Object, I32, I32]),
             Self::SurfaceDamageBuffer => spec(
                 I::Surface,
                 Method,

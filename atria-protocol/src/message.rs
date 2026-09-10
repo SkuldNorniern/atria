@@ -176,6 +176,40 @@ impl EncodePayload for RegistryGlobal<'_> {
     }
 }
 
+/// `atria_shm.create_pool` payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CreatePool {
+    pub new_id: ObjectId,
+    pub memory: HandleIndex,
+    /// Bytes of the resource this pool covers. Checked against the resource at resolution.
+    pub size: u32,
+}
+
+impl CreatePool {
+    pub fn decode(input: &[u8]) -> Result<Self, DecodeError> {
+        let mut decoder = Decoder::new(input);
+        let value = Self {
+            new_id: ObjectId::from_raw(decoder.read_u32()?),
+            memory: decoder.read_handle(HandleKind::SharedMemory)?,
+            size: decoder.read_u32()?,
+        };
+        decoder.finish()?;
+        Ok(value)
+    }
+}
+
+impl EncodePayload for CreatePool {
+    fn encoded_len(&self) -> Result<usize, EncodeError> {
+        Ok(12)
+    }
+
+    fn encode(&self, encoder: &mut Encoder<'_>) -> Result<(), EncodeError> {
+        encoder.write_u32(self.new_id.into_raw())?;
+        encoder.write_handle(self.memory)?;
+        encoder.write_u32(self.size)
+    }
+}
+
 /// `surface.attach_with_fence` payload assigned in wire example 2.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AttachWithFence {
