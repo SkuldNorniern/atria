@@ -24,6 +24,7 @@ pub enum ErrorCode {
     InvalidState = 0x0100,
     UnsupportedCapability = 0x0101,
     QuotaExceeded = 0x0200,
+    EventQueueOverflow = 0x0201,
 }
 
 impl ErrorCode {
@@ -37,7 +38,7 @@ impl ErrorCode {
             | Self::UnknownOpcode
             | Self::ConnectionClosed => ErrorCategory::Protocol,
             Self::InvalidState | Self::UnsupportedCapability => ErrorCategory::Object,
-            Self::QuotaExceeded => ErrorCategory::Resource,
+            Self::QuotaExceeded | Self::EventQueueOverflow => ErrorCategory::Resource,
         }
     }
 }
@@ -74,6 +75,10 @@ pub enum StateError {
     QuotaExceeded {
         object_id: ObjectId,
     },
+    /// The connection has more events queued than it may hold, so it is not reading them.
+    EventQueueOverflow {
+        queued: usize,
+    },
 }
 
 impl StateError {
@@ -89,6 +94,7 @@ impl StateError {
             Self::InvalidState { .. } => ErrorCode::InvalidState,
             Self::UnsupportedCapability { .. } => ErrorCode::UnsupportedCapability,
             Self::QuotaExceeded { .. } => ErrorCode::QuotaExceeded,
+            Self::EventQueueOverflow { .. } => ErrorCode::EventQueueOverflow,
         }
     }
 
@@ -108,7 +114,7 @@ impl StateError {
             | Self::InvalidState { object_id }
             | Self::UnsupportedCapability { object_id, .. }
             | Self::QuotaExceeded { object_id } => object_id,
-            Self::ConnectionClosed => ObjectId::DISPLAY,
+            Self::ConnectionClosed | Self::EventQueueOverflow { .. } => ObjectId::DISPLAY,
         }
     }
 }
@@ -165,6 +171,10 @@ impl fmt::Display for StateError {
                 formatter,
                 "creating object {} would exceed this connection's resource quota",
                 object_id.into_raw()
+            ),
+            Self::EventQueueOverflow { queued } => write!(
+                formatter,
+                "the connection has {queued} events queued and is not reading them"
             ),
         }
     }
