@@ -16,6 +16,23 @@ use crate::model::{
 };
 use crate::registry::{ObjectRegistry, Teardown};
 
+/// Bounds on the compositor as a whole, rather than on any one connection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ServerLimits {
+    pub max_connections: usize,
+}
+
+impl Default for ServerLimits {
+    fn default() -> Self {
+        Self {
+            // One connection is one channel on Artery, and the kernel bounds channel pairs at 64.
+            // A compositor that accepted more would be promising a transport it cannot be given.
+            max_connections: 64,
+        }
+    }
+}
+
+/// Bounds on one connection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ConnectionLimits {
     pub max_objects: usize,
@@ -46,6 +63,10 @@ pub enum NegotiationError {
         available: CapabilitySet,
     },
     ConnectionIdExhausted,
+    /// The compositor already holds [`ServerLimits::max_connections`] connections.
+    ConnectionLimitReached {
+        limit: usize,
+    },
 }
 
 impl fmt::Display for NegotiationError {
@@ -57,6 +78,10 @@ impl fmt::Display for NegotiationError {
             } => write!(
                 formatter,
                 "connection requires capabilities {required:?}, but only {available:?} are mutually available"
+            ),
+            Self::ConnectionLimitReached { limit } => write!(
+                formatter,
+                "the compositor already holds its limit of {limit} connections"
             ),
             Self::ConnectionIdExhausted => formatter
                 .write_str("cannot create a connection because all connection IDs are exhausted"),
@@ -143,6 +168,7 @@ struct Scene {
 #[derive(Clone, Debug)]
 pub struct CompositorState {
     server_capabilities: CapabilitySet,
+    server_limits: ServerLimits,
     limits: ConnectionLimits,
     next_connection: u64,
     next_commit: u64,
@@ -155,11 +181,16 @@ pub struct CompositorState {
 
 impl CompositorState {
     #[must_use]
-    pub fn new(server_capabilities: CapabilitySet, limits: ConnectionLimits) -> Self {
+    pub fn new(
+        server_capabilities: CapabilitySet,
+        server_limits: ServerLimits,
+        limits: ConnectionLimits,
+    ) -> Self {
         Self {
             server_capabilities: server_capabilities
                 .with(Capability::SurfaceCreate)
                 .with(Capability::BufferImport),
+            server_limits,
             limits,
             next_connection: 1,
             next_commit: 1,
@@ -185,6 +216,11 @@ impl CompositorState {
             return Err(NegotiationError::UnsupportedCapabilities {
                 required,
                 available,
+            });
+        }
+        if self.connections.len() >= self.server_limits.max_connections {
+            return Err(NegotiationError::ConnectionLimitReached {
+                limit: self.server_limits.max_connections,
             });
         }
         if self.next_connection == u64::MAX {

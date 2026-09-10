@@ -9,7 +9,7 @@
 
 use atria_compositor::{
     BufferDescriptor, BufferTransport, ClientRequest, CompositorState, ConnectionLimits,
-    NegotiationError, Point, Rect, Size, StateError, SurfaceKey,
+    NegotiationError, Point, Rect, ServerLimits, Size, StateError, SurfaceKey,
 };
 use atria_protocol::ObjectId;
 use atria_software_output::{
@@ -157,7 +157,11 @@ impl From<SinkError> for FirstLightError {
 fn main() -> Result<(), FirstLightError> {
     let layout = PixelLayout::new(BYTES_PER_PIXEL as u8)?;
     let software_profile = capabilities();
-    let mut state = CompositorState::new(software_profile, ConnectionLimits::default());
+    let mut state = CompositorState::new(
+        software_profile,
+        ServerLimits::default(),
+        ConnectionLimits::default(),
+    );
     let connection = state.connect(software_profile, software_profile)?;
     state.create_session(connection, id(256), None, true)?;
 

@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use atria_compositor::{
     BufferDescriptor, BufferState, BufferTransport, ClientRequest, CompositorState, ConnectionId,
-    ConnectionLimits, EventKind, Point, Rect, Size, SurfaceKey,
+    ConnectionLimits, EventKind, Point, Rect, ServerLimits, Size, SurfaceKey,
 };
 use atria_protocol::ObjectId;
 use atria_protocol::capability::Capability;
@@ -41,7 +41,11 @@ fn packed_descriptor(width: u32, height: u32) -> BufferDescriptor {
 }
 
 fn setup() -> (CompositorState, ConnectionId) {
-    let mut state = CompositorState::new(capabilities(), ConnectionLimits::default());
+    let mut state = CompositorState::new(
+        capabilities(),
+        ServerLimits::default(),
+        ConnectionLimits::default(),
+    );
     let connection = state
         .connect(capabilities(), Default::default())
         .unwrap_or_else(|error| panic!("software profile negotiates: {error:?}"));

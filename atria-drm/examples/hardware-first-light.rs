@@ -14,7 +14,7 @@ use std::fmt;
 
 use atria_compositor::{
     BufferDescriptor, BufferTransport, ClientRequest, CompositorState, ConnectionLimits,
-    NegotiationError, Point, Rect, Size, StateError, SurfaceKey,
+    NegotiationError, Point, Rect, ServerLimits, Size, StateError, SurfaceKey,
 };
 use atria_drm::{DeviceConfig, DrmError, DrmSink};
 use atria_protocol::ObjectId;
@@ -144,7 +144,11 @@ fn main() -> Result<(), HardwareFirstLightError> {
     };
 
     let capabilities = software_capabilities();
-    let mut state = CompositorState::new(capabilities, ConnectionLimits::default());
+    let mut state = CompositorState::new(
+        capabilities,
+        ServerLimits::default(),
+        ConnectionLimits::default(),
+    );
     let connection = state.connect(capabilities, capabilities)?;
     state.create_session(connection, id(256), None, true)?;
     state.dispatch(

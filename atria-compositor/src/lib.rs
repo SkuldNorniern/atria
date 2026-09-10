@@ -21,4 +21,4 @@ pub use model::{
     SessionSnapshot, Size, SurfaceKey, SurfaceRole, SurfaceSnapshot,
 };
 pub use registry::{ObjectRegistry, Teardown};
-pub use state::{CompositorState, ConnectionLimits, NegotiationError};
+pub use state::{CompositorState, ConnectionLimits, NegotiationError, ServerLimits};

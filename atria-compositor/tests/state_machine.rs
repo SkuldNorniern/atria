@@ -2,8 +2,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use atria_compositor::{
     BufferDescriptor, BufferState, BufferTransport, ClientRequest, CompositorState, ConnectionId,
-    ConnectionLimits, Damage, ErrorCode, EventKind, FocusEvent, ObjectKind, Point, Rect,
-    SeatCapabilities, Size, StateError, SurfaceKey, SurfaceRole,
+    ConnectionLimits, Damage, ErrorCode, EventKind, FocusEvent, NegotiationError, ObjectKind,
+    Point, Rect, SeatCapabilities, ServerLimits, Size, StateError, SurfaceKey, SurfaceRole,
 };
 use atria_protocol::ObjectId;
 use atria_protocol::capability::{Capability, CapabilitySet};
@@ -28,7 +28,7 @@ fn descriptor(width: u32, height: u32) -> BufferDescriptor {
 }
 
 fn state_with_limits(limits: ConnectionLimits) -> CompositorState {
-    CompositorState::new(software_capabilities(), limits)
+    CompositorState::new(software_capabilities(), ServerLimits::default(), limits)
 }
 
 fn connect(state: &mut CompositorState) -> ConnectionId {
@@ -426,7 +426,11 @@ fn pointer_target_uses_topmost_surface_under_pointer() {
 
 #[test]
 fn absent_fence_and_seat_capabilities_are_discoverable_and_not_emulated() {
-    let mut state = CompositorState::new(software_capabilities(), ConnectionLimits::default());
+    let mut state = CompositorState::new(
+        software_capabilities(),
+        ServerLimits::default(),
+        ConnectionLimits::default(),
+    );
     let client = connect(&mut state);
     let negotiated = state.capabilities(client).expect("live client");
     assert!(!negotiated.contains(Capability::ExplicitGpuFence));
@@ -452,7 +456,11 @@ fn absent_fence_and_seat_capabilities_are_discoverable_and_not_emulated() {
 #[test]
 fn acquire_fence_blocks_presentation_until_signaled() {
     let capabilities = software_capabilities().with(Capability::ExplicitGpuFence);
-    let mut state = CompositorState::new(capabilities, ConnectionLimits::default());
+    let mut state = CompositorState::new(
+        capabilities,
+        ServerLimits::default(),
+        ConnectionLimits::default(),
+    );
     let client = state
         .connect(capabilities, CapabilitySet::empty())
         .expect("capabilities overlap");
@@ -617,4 +625,37 @@ fn arbitrary_decoded_requests_return_errors_without_panicking() {
         }));
         assert!(result.is_ok(), "state machine panicked for seed {seed}");
     }
+}
+
+/// A connection table that grows without a bound is a client-reachable allocation, and the
+/// transport makes it reachable by anything that can open a socket. Refusing past the limit is
+/// what keeps the compositor's failure mode inside the compositor.
+#[test]
+fn connections_past_the_server_limit_are_refused_rather_than_accepted() {
+    let limit = 3;
+    let mut state = CompositorState::new(
+        software_capabilities(),
+        ServerLimits {
+            max_connections: limit,
+        },
+        ConnectionLimits::default(),
+    );
+
+    let accepted: Vec<ConnectionId> = (0..limit).map(|_| connect(&mut state)).collect();
+    assert_eq!(accepted.len(), limit);
+
+    assert_eq!(
+        state.connect(software_capabilities(), CapabilitySet::empty()),
+        Err(NegotiationError::ConnectionLimitReached { limit })
+    );
+
+    // Refusal is not permanent: closing one makes room for exactly one more, so a compositor
+    // that has been at its limit is not a compositor that has stopped accepting clients.
+    state.close_connection(accepted[0]);
+    let replacement = connect(&mut state);
+    assert!(state.is_connected(replacement));
+    assert_eq!(
+        state.connect(software_capabilities(), CapabilitySet::empty()),
+        Err(NegotiationError::ConnectionLimitReached { limit })
+    );
 }
