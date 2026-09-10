@@ -2,10 +2,11 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use atria_protocol::capability::{Capability, CapabilitySet};
 use atria_protocol::error::{ErrorCategory, ErrorCode};
+use atria_protocol::interface::{Interface, MessageKind, Operation, decode_operation};
 use atria_protocol::message::{
     AttachWithFence, ConnectRequest, DisplayError, EncodePayload, RegistryGlobal, encode_message,
 };
-use atria_protocol::opcode::{Interface, MessageKind, Opcode, Operation, decode_operation};
+use atria_protocol::opcode::Opcode;
 use atria_protocol::version::VersionRange;
 use atria_protocol::wire::{
     Decoder, Encoder, Frame, HANDLE_PLACEHOLDER_BASE, HEADER_SIZE, HandleIndex, HandleKind,
@@ -230,7 +231,7 @@ fn malformed_strings_fds_and_trailing_payload_are_rejected() {
 }
 
 #[test]
-fn unknown_and_forbidden_opcodes_are_typed_errors() {
+fn an_opcode_the_interface_does_not_define_is_a_typed_error() {
     let unknown = Opcode::from_raw(0x00ff);
     assert_eq!(
         decode_operation(Interface::Display, MessageKind::Method, unknown),
@@ -256,12 +257,14 @@ fn unknown_and_forbidden_opcodes_are_typed_errors() {
         })
     );
     assert_eq!(
-        decode_operation(
-            Interface::Surface,
-            MessageKind::Method,
-            Opcode::from_raw(0x0011)
-        ),
-        Ok(Operation::SurfaceAttachWithFence)
+        decode_operation(Interface::Surface, MessageKind::Method, Opcode::from_raw(1)),
+        Ok(Operation::SurfaceAttach)
+    );
+    // The same number on the same interface in the other direction is a different operation, or
+    // none. Direction is part of the identity, not a filter applied afterwards.
+    assert_eq!(
+        decode_operation(Interface::Surface, MessageKind::Event, Opcode::from_raw(1)),
+        Ok(Operation::SurfaceLeave)
     );
 }
 

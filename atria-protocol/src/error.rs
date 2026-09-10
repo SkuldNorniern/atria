@@ -3,7 +3,8 @@
 use core::error::Error;
 use core::fmt;
 
-use crate::opcode::{Interface, MessageKind, Opcode};
+use crate::interface::{Interface, MessageKind};
+use crate::opcode::Opcode;
 
 /// A failure to encode a value into a caller-provided buffer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

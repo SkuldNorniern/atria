@@ -11,6 +11,7 @@
 //! table entry cannot be filed in one place and describe another.
 
 use crate::wire::{HEADER_SIZE, HandleKind};
+use crate::{DecodeError, Opcode};
 
 /// One field of a payload, in wire order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -320,6 +321,28 @@ impl Interface {
             ],
         }
     }
+}
+
+/// The operation an interface defines at this opcode, for this direction.
+///
+/// Derived from the table, so an opcode is decodable exactly when the table lists it: there is
+/// no second place where a number could be recognised or forgotten.
+pub fn decode_operation(
+    interface: Interface,
+    kind: MessageKind,
+    opcode: Opcode,
+) -> Result<Operation, DecodeError> {
+    let list = match kind {
+        MessageKind::Method => interface.methods(),
+        MessageKind::Event => interface.events(),
+    };
+    list.get(usize::from(opcode.into_raw()))
+        .copied()
+        .ok_or(DecodeError::UnknownOpcode {
+            interface,
+            kind,
+            opcode,
+        })
 }
 
 /// Every interface the draw path defines.
