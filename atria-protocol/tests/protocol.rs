@@ -240,9 +240,18 @@ fn unknown_and_forbidden_opcodes_are_typed_errors() {
             opcode: unknown,
         })
     );
+    // No range is forbidden, because no range means anything on its own. An opcode the
+    // interface does not define as a method is refused whatever number it holds, which is a
+    // stronger rule than reserving one band of the space for the compositor.
     assert_eq!(
-        Opcode::from_raw(0xf123).validate_from_untrusted_client(),
-        Err(DecodeError::ForbiddenClientOpcode {
+        decode_operation(
+            Interface::Display,
+            MessageKind::Method,
+            Opcode::from_raw(0xf123)
+        ),
+        Err(DecodeError::UnknownOpcode {
+            interface: Interface::Display,
+            kind: MessageKind::Method,
             opcode: Opcode::from_raw(0xf123),
         })
     );

@@ -45,8 +45,6 @@ pub enum DecodeError {
         kind: MessageKind,
         opcode: Opcode,
     },
-    /// An untrusted client used the compositor-internal/debugging namespace.
-    ForbiddenClientOpcode { opcode: Opcode },
 }
 
 impl fmt::Display for EncodeError {
@@ -109,11 +107,6 @@ impl fmt::Display for DecodeError {
             } => write!(
                 formatter,
                 "opcode {:#06x} is not defined for {interface:?} {kind:?} messages",
-                opcode.into_raw()
-            ),
-            Self::ForbiddenClientOpcode { opcode } => write!(
-                formatter,
-                "client opcode {:#06x} uses the compositor-internal debugging namespace",
                 opcode.into_raw()
             ),
         }

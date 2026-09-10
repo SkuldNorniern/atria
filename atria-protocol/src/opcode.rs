@@ -1,8 +1,13 @@
 //! Interface operations and the opcode assignments present in the draft.
+//!
+//! An opcode is local to its interface. There is no global range table: the same number means
+//! different things on different interfaces, and only the object being addressed says which
+//! interface is in play. `display.get_registry` and `buffer.release_with_fence` are both
+//! `0x0001` and are told apart by the object, not by the number.
 
 use crate::DecodeError;
 
-/// A wire opcode.
+/// A wire opcode, meaningful only alongside the interface it was sent to.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[repr(transparent)]
 pub struct Opcode(u16);
@@ -17,29 +22,6 @@ impl Opcode {
     pub const fn into_raw(self) -> u16 {
         self.0
     }
-
-    #[must_use]
-    pub const fn namespace(self) -> OpcodeNamespace {
-        match self.0 {
-            0x0000..=0x00ff => OpcodeNamespace::Core,
-            0x0100..=0x01ff => OpcodeNamespace::FrameScheduling,
-            0x0250..=0x027f => OpcodeNamespace::LinuxPlatform,
-            0x0280..=0x02ff => OpcodeNamespace::ArteryPlatform,
-            0x0200..=0x024f => OpcodeNamespace::FirstPartyExtension,
-            0x0300..=0x03ff => OpcodeNamespace::FutureCore,
-            0x0400..=0xefff => OpcodeNamespace::ThirdPartyExtension,
-            0xf000..=0xffff => OpcodeNamespace::InternalDebug,
-        }
-    }
-
-    /// Rejects the namespace that draft §13 forbids on untrusted client input.
-    pub const fn validate_from_untrusted_client(self) -> Result<(), DecodeError> {
-        if matches!(self.namespace(), OpcodeNamespace::InternalDebug) {
-            Err(DecodeError::ForbiddenClientOpcode { opcode: self })
-        } else {
-            Ok(())
-        }
-    }
 }
 
 impl From<u16> for Opcode {
@@ -52,19 +34,6 @@ impl From<Opcode> for u16 {
     fn from(value: Opcode) -> Self {
         value.into_raw()
     }
-}
-
-/// Namespace ranges assigned by draft §13.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum OpcodeNamespace {
-    Core,
-    FrameScheduling,
-    FirstPartyExtension,
-    LinuxPlatform,
-    ArteryPlatform,
-    FutureCore,
-    ThirdPartyExtension,
-    InternalDebug,
 }
 
 /// Core interfaces named by draft §4.
