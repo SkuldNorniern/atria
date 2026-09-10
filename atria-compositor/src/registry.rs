@@ -50,6 +50,12 @@ impl<T> ObjectRegistry<T> {
         self.live.is_empty()
     }
 
+    /// The kind of a live object, or `None` when this registry does not hold it.
+    #[must_use]
+    pub fn kind_of(&self, id: ObjectId) -> Option<ObjectKind> {
+        self.live.get(&id).map(|entry| entry.kind)
+    }
+
     pub(crate) fn allocate_client(
         &mut self,
         id: ObjectId,

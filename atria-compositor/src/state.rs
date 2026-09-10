@@ -1003,7 +1003,12 @@ impl CompositorState {
             .map(|value| &value.snapshot)
     }
 
+    /// What kind of object `id` is, for a caller binding a frame addressed to it.
     #[must_use]
+    pub fn object_kind(&self, connection: ConnectionId, id: ObjectId) -> Option<ObjectKind> {
+        self.connections.get(&connection)?.registry.kind_of(id)
+    }
+
     pub fn surface_role(&self, connection: ConnectionId, surface: ObjectId) -> Option<SurfaceRole> {
         self.surface(connection, surface).ok()?.role
     }

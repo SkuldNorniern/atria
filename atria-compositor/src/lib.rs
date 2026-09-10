@@ -9,11 +9,13 @@
 
 extern crate alloc;
 
+mod binding;
 mod error;
 mod model;
 mod registry;
 mod state;
 
+pub use binding::{BindError, interface_of, request_from_frame};
 pub use error::{ErrorCode, StateError};
 pub use model::{
     BufferDescriptor, BufferState, BufferTransport, ClientRequest, CommitId, ConnectionId, Damage,
