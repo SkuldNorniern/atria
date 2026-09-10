@@ -120,7 +120,7 @@ pub fn decode(kind: ObjectKind, frame: &Frame<'_>) -> Result<DecodedRequest, Bin
 /// small for what the message says it holds. A request with no handles cannot fail here.
 pub fn resolve(
     request: DecodedRequest,
-    handles: &impl HandleResolver,
+    handles: &mut impl HandleResolver,
 ) -> Result<ClientRequest, ResolveError> {
     match request {
         DecodedRequest::CreateRegistry { new_id } => Ok(ClientRequest::CreateRegistry { new_id }),

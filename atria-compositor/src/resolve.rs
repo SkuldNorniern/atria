@@ -22,12 +22,11 @@ use atria_protocol::wire::{HandleIndex, HandleKind};
 pub enum ResolveError {
     /// The message named a slot the transport did not carry a handle in.
     SlotEmpty { slot: u8 },
-    /// The slot holds a resource of the wrong kind for the field that named it.
-    WrongKind {
-        slot: u8,
-        expected: HandleKind,
-        actual: HandleKind,
-    },
+    /// The slot does not hold the kind of resource the field requires.
+    ///
+    /// Says what was required rather than what was found: classifying an arbitrary resource is
+    /// platform work with no caller, and the field's requirement is the fact that matters.
+    WrongKind { slot: u8, expected: HandleKind },
     /// The resource is of the right kind but does not permit what the request needs.
     InsufficientRights { slot: u8 },
     /// The resource is too small for what the message says it holds.
@@ -70,11 +69,15 @@ impl SharedMemory {
 /// slot through its ancillary descriptor array, an Artery transport through the capability
 /// handles moved with the message, and a test through a table it filled in itself.
 pub trait HandleResolver {
-    /// The shared memory in `slot`, or why it is not.
+    /// Claim the shared memory in `slot`, or say why it cannot be claimed.
+    ///
+    /// Takes `&mut self` because resolving a slot transfers ownership: the resource moves out of
+    /// the message that carried it and into whatever outlives the message. A slot may therefore
+    /// be claimed once.
     ///
     /// # Errors
     ///
     /// Returns [`ResolveError`] when the slot is empty, holds another kind, or does not permit
     /// what the caller needs.
-    fn shared_memory(&self, slot: HandleIndex) -> Result<SharedMemory, ResolveError>;
+    fn shared_memory(&mut self, slot: HandleIndex) -> Result<SharedMemory, ResolveError>;
 }

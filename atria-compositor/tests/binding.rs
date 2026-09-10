@@ -24,7 +24,7 @@ fn id(raw: u32) -> ObjectId {
 struct NoHandles;
 
 impl HandleResolver for NoHandles {
-    fn shared_memory(&self, slot: HandleIndex) -> Result<SharedMemory, ResolveError> {
+    fn shared_memory(&mut self, slot: HandleIndex) -> Result<SharedMemory, ResolveError> {
         Err(ResolveError::SlotEmpty { slot: slot.slot() })
     }
 }
@@ -221,8 +221,8 @@ fn a_bound_request_is_accepted_by_the_state_machine() {
         .object_kind(connection, frame.header.object_id)
         .expect("the display object is always live");
     let decoded = decode(kind, &frame).expect("a modelled request decodes");
-    let request =
-        resolve(decoded, &NoHandles).expect("a request naming no handles cannot fail resolution");
+    let request = resolve(decoded, &mut NoHandles)
+        .expect("a request naming no handles cannot fail resolution");
 
     state
         .dispatch(connection, request)
@@ -240,7 +240,7 @@ struct OneRegion {
 }
 
 impl HandleResolver for OneRegion {
-    fn shared_memory(&self, slot: HandleIndex) -> Result<SharedMemory, ResolveError> {
+    fn shared_memory(&mut self, slot: HandleIndex) -> Result<SharedMemory, ResolveError> {
         if slot.slot() == self.slot {
             Ok(self.memory)
         } else {
@@ -282,19 +282,19 @@ fn each_stage_reports_its_own_kind_of_failure() {
     let frame = Frame::decode(packet).expect("frame must decode");
     let decoded = decode(ObjectKind::Shm, &frame).expect("the message is well formed");
     assert_eq!(
-        resolve(decoded, &NoHandles),
+        resolve(decoded, &mut NoHandles),
         Err(ResolveError::SlotEmpty { slot: 3 })
     );
 
     // Resolve: the slot holds memory, and less of it than the message claims. Believing the
     // message would let every buffer carved from this pool be checked against a size that was
     // never true.
-    let carrying = OneRegion {
+    let mut carrying = OneRegion {
         slot: 3,
         memory: SharedMemory::new(77, 1024),
     };
     assert_eq!(
-        resolve(decoded, &carrying),
+        resolve(decoded, &mut carrying),
         Err(ResolveError::TooSmall {
             slot: 3,
             needed: 4096,
@@ -308,7 +308,7 @@ fn each_stage_reports_its_own_kind_of_failure() {
     let frame = Frame::decode(packet).expect("frame must decode");
     let decoded = decode(ObjectKind::Shm, &frame).expect("the message is well formed");
     assert_eq!(
-        resolve(decoded, &carrying),
+        resolve(decoded, &mut carrying),
         Ok(ClientRequest::CreatePool {
             new_id: id(301),
             memory: SharedMemory::new(77, 512),
