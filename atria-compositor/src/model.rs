@@ -236,6 +236,8 @@ pub enum EventKind {
     Error(StateError),
     CapabilityRevoked(Capability),
     ObjectDestroyed(ObjectKind),
+    /// The identifier is retired and the client may allocate it again.
+    IdRetired,
     BufferRelease,
     BufferReleaseWithFence {
         fence: ObjectId,

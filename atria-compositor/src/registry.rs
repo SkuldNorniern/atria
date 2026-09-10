@@ -50,6 +50,16 @@ impl<T> ObjectRegistry<T> {
         self.live.is_empty()
     }
 
+    /// Release an identifier so the client may allocate it again.
+    ///
+    /// Called only once the retirement has been queued for the client. Ordering on the
+    /// connection is what makes reuse safe: everything the client sent naming the old object was
+    /// sent before it learned the identifier was free, so it arrives before any new object can
+    /// claim the number.
+    pub(crate) fn retire(&mut self, id: ObjectId) -> bool {
+        !self.live.contains_key(&id) && self.used.remove(&id)
+    }
+
     /// The kind of a live object, or `None` when this registry does not hold it.
     #[must_use]
     pub fn kind_of(&self, id: ObjectId) -> Option<ObjectKind> {

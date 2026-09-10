@@ -1240,6 +1240,12 @@ impl CompositorState {
             if client.registry.remove(object_id).is_some() {
                 destroyed.push((object_id, kind));
                 self.push_event(connection, object_id, EventKind::ObjectDestroyed(kind));
+                // Queued after the destruction the client is being told about, so it learns the
+                // object is gone before it learns the number is free again.
+                self.push_event(connection, object_id, EventKind::IdRetired);
+                if let Some(client) = self.connections.get_mut(&connection) {
+                    client.registry.retire(object_id);
+                }
             }
         }
     }

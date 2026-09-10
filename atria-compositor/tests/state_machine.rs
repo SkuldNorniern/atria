@@ -153,15 +153,61 @@ fn destroying_same_numeric_id_on_one_connection_does_not_touch_another() {
     ));
 }
 
+/// A connection-scoped identifier is a `u32`, so a long-lived client that creates and destroys
+/// objects has to be able to reuse them or it eventually runs out. Reuse is safe because the
+/// client is told the number is free, and everything it sent naming the old object was sent
+/// before it could have learned that.
 #[test]
-fn destroyed_id_cannot_be_reused_before_connection_teardown() {
+fn a_destroyed_id_is_announced_as_retired_and_may_then_be_reused() {
     let mut state = state_with_limits(ConnectionLimits::default());
     let client = connect(&mut state);
     create_session(&mut state, client, 256);
     create_surface(&mut state, client, 256, 257);
+    let _ = state.take_events();
+
     state
         .dispatch(client, ClientRequest::Destroy { object: id(257) })
-        .expect("first destruction succeeds");
+        .unwrap_or_else(|error| panic!("destruction succeeds: {error:?}"));
+
+    let kinds: Vec<_> = state
+        .take_events()
+        .into_iter()
+        .filter(|event| event.object_id == id(257))
+        .map(|event| event.kind)
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            EventKind::ObjectDestroyed(ObjectKind::Surface),
+            EventKind::IdRetired
+        ],
+        "the object is reported gone before the number is reported free"
+    );
+
+    state
+        .dispatch(
+            client,
+            ClientRequest::CreateSurface {
+                session: id(256),
+                new_id: id(257),
+            },
+        )
+        .unwrap_or_else(|error| panic!("a retired identifier is allocatable again: {error:?}"));
+    assert_eq!(
+        state.object_kind(client, id(257)),
+        Some(ObjectKind::Surface)
+    );
+    assert!(state.is_connected(client));
+}
+
+/// Reuse is only legal after retirement. An identifier that still names a live object is a
+/// protocol error, because accepting it would leave two objects answering to one number.
+#[test]
+fn a_live_id_cannot_be_claimed_a_second_time() {
+    let mut state = state_with_limits(ConnectionLimits::default());
+    let client = connect(&mut state);
+    create_session(&mut state, client, 256);
+    create_surface(&mut state, client, 256, 257);
 
     let error = state.dispatch(
         client,
