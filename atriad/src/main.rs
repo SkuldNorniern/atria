@@ -25,13 +25,13 @@ use atria_protocol::capability::CapabilitySet;
 use atria_transport::UnixTransport;
 use atriad::{Session, SessionError, compositor, software_capabilities};
 
-/// Identifiers the server offers a client before it may address anything.
+/// The session the server establishes for each connection.
 ///
-/// Server-side until `registry.bind` is modelled. A client cannot reach a factory it has no
-/// object for, and which globals a compositor offers is its own decision rather than a request.
+/// A session is not a global: a connection belongs to one, and does not choose it.
 const SESSION_ID: u32 = 9;
-const SHM_ID: u32 = 10;
-const COMPOSITOR_ID: u32 = 11;
+
+/// The version each global is advertised at. One, because none of them has a second yet.
+const VERSION: u32 = 1;
 
 fn main() -> ExitCode {
     match run() {
@@ -54,6 +54,14 @@ fn run() -> io::Result<()> {
 
     let mut state = compositor(ServerLimits::default(), ConnectionLimits::default());
 
+    // Advertised once. Which globals exist is the compositor's decision, and a client learns
+    // them from its registry rather than being handed identifiers it did not choose.
+    for kind in [ObjectKind::Compositor, ObjectKind::Shm] {
+        if state.advertise_global(kind, VERSION).is_none() {
+            return Err(io::Error::other("a global could not be advertised"));
+        }
+    }
+
     loop {
         let socket = accept(&listener)?;
         let connection = match state.connect(software_capabilities(), CapabilitySet::empty()) {
@@ -66,7 +74,7 @@ fn run() -> io::Result<()> {
             }
         };
 
-        if let Err(error) = offer_globals(&mut state, connection) {
+        if let Err(error) = establish_session(&mut state, connection) {
             eprintln!("atriad: could not establish a session: {error}");
             state.close_connection(connection);
             continue;
@@ -89,14 +97,11 @@ fn run() -> io::Result<()> {
     }
 }
 
-fn offer_globals(state: &mut CompositorState, connection: ConnectionId) -> Result<(), StateError> {
-    state.create_session(connection, ObjectId::from_raw(SESSION_ID), None, true)?;
-    state.install_global(connection, ObjectId::from_raw(SHM_ID), ObjectKind::Shm)?;
-    state.install_global(
-        connection,
-        ObjectId::from_raw(COMPOSITOR_ID),
-        ObjectKind::Compositor,
-    )
+fn establish_session(
+    state: &mut CompositorState,
+    connection: ConnectionId,
+) -> Result<(), StateError> {
+    state.create_session(connection, ObjectId::from_raw(SESSION_ID), None, true)
 }
 
 /// Bind and listen on a `SOCK_SEQPACKET` socket at `path`.

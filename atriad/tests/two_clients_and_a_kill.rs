@@ -14,7 +14,8 @@ use atria_compositor::{
 use atria_protocol::capability::CapabilitySet;
 use atria_protocol::interface::Operation;
 use atria_protocol::message::{
-    Attach, Commit, CreateBuffer, CreatePool, DamageBuffer, EncodePayload, NewId, encode_message,
+    Attach, Bind, Commit, CreateBuffer, CreatePool, DamageBuffer, EncodePayload, NewId,
+    encode_message,
 };
 use atria_protocol::wire::{HandleIndex, HandleKind, Header, MAX_MESSAGE_SIZE};
 use atria_protocol::{ObjectId, Opcode};
@@ -228,22 +229,71 @@ fn draw(
         .unwrap_or_else(|error| panic!("the frame is committed: {error:?}"));
 }
 
-/// Everything a client needs, established by the server before it may draw.
-fn accept(state: &mut CompositorState, transport: UnixTransport) -> Session {
+/// Which globals the compositor offers, advertised once as a server does at startup.
+fn advertise(state: &mut CompositorState) -> (u32, u32) {
+    let compositor = state
+        .advertise_global(ObjectKind::Compositor, 1)
+        .unwrap_or_else(|| panic!("the compositor global is advertised"));
+    let shm = state
+        .advertise_global(ObjectKind::Shm, 1)
+        .unwrap_or_else(|| panic!("the shared-memory global is advertised"));
+    (compositor, shm)
+}
+
+/// Accept a connection and take it as far as a client that has bound what it needs.
+///
+/// The client does the binding, from names it learned from its registry — the server hands it no
+/// identifier it did not choose.
+fn accept(
+    state: &mut CompositorState,
+    transport: UnixTransport,
+    client: &mut Client,
+    globals: (u32, u32),
+) -> Session {
     let connection = state
         .connect(software_capabilities(), CapabilitySet::empty())
         .unwrap_or_else(|error| panic!("the server's own capabilities always overlap: {error:?}"));
-    // The globals a client binds. Modelled by the server directly until `registry.bind` is.
     state
         .create_session(connection, id(9), None, true)
         .unwrap_or_else(|error| panic!("the connection's session is established: {error:?}"));
-    state
-        .install_global(connection, id(10), ObjectKind::Shm)
-        .unwrap_or_else(|error| panic!("the shared-memory factory is offered: {error:?}"));
-    state
-        .install_global(connection, id(11), ObjectKind::Compositor)
-        .unwrap_or_else(|error| panic!("the compositor global is offered: {error:?}"));
-    Session::new(transport, connection)
+    let mut session = Session::new(transport, connection);
+
+    client.request(
+        ObjectId::DISPLAY,
+        Operation::DisplayGetRegistry,
+        &NewId { new_id: id(2) },
+    );
+    let served = session
+        .serve_one(state)
+        .unwrap_or_else(|error| panic!("the registry is created: {error:?}"));
+    assert_eq!(
+        served.events_sent, 2,
+        "a fresh registry announces every global"
+    );
+    for _ in 0..2 {
+        let announced = client.receive_event();
+        assert_eq!(
+            announced.opcode.into_raw(),
+            Operation::RegistryGlobal.opcode(),
+            "the client learns what exists rather than being handed an identifier"
+        );
+    }
+
+    for (name, at) in [(globals.0, 11), (globals.1, 10)] {
+        client.request(
+            id(2),
+            Operation::RegistryBind,
+            &Bind {
+                name,
+                version: 1,
+                new_id: id(at),
+            },
+        );
+        session
+            .serve_one(state)
+            .unwrap_or_else(|error| panic!("a global binds: {error:?}"));
+    }
+    session
 }
 
 #[test]
@@ -254,12 +304,13 @@ fn two_clients_draw_at_once_and_one_dying_does_not_disturb_the_other() {
         ConnectionLimits::default(),
     );
 
+    let globals = advertise(&mut state);
     let (first_socket, first_server) = pair();
     let (second_socket, second_server) = pair();
-    let mut first = accept(&mut state, first_server);
-    let mut second = accept(&mut state, second_server);
     let mut first_client = Client::new(first_socket);
     let mut second_client = Client::new(second_socket);
+    let mut first = accept(&mut state, first_server, &mut first_client, globals);
+    let mut second = accept(&mut state, second_server, &mut second_client, globals);
 
     draw(&mut first_client, &mut first, &mut state, 256, 257, 258);
     draw(&mut second_client, &mut second, &mut state, 256, 257, 258);
@@ -321,8 +372,14 @@ fn two_clients_draw_at_once_and_one_dying_does_not_disturb_the_other() {
         .unwrap_or_else(|error| panic!("and commits another frame: {error:?}"));
 
     // And the compositor can still take a replacement.
-    let (_replacement_client, replacement_server) = pair();
-    let replacement = accept(&mut state, replacement_server);
+    let (replacement_socket, replacement_server) = pair();
+    let mut replacement_client = Client::new(replacement_socket);
+    let replacement = accept(
+        &mut state,
+        replacement_server,
+        &mut replacement_client,
+        globals,
+    );
     assert!(state.is_connected(replacement.connection()));
 }
 
@@ -338,9 +395,10 @@ fn a_clients_pixels_reach_a_frame_and_its_buffer_comes_back() {
         ServerLimits::default(),
         ConnectionLimits::default(),
     );
+    let globals = advertise(&mut state);
     let (socket, server) = pair();
-    let mut session = accept(&mut state, server);
     let mut client = Client::new(socket);
+    let mut session = accept(&mut state, server, &mut client, globals);
 
     let region = memory(4096);
     // A recognisable colour, so the frame proves the client's own bytes arrived rather than any
