@@ -159,10 +159,7 @@ impl<T: Transport> Session<T> {
         let mut sent = 0;
         let mut unassigned = 0;
 
-        for event in state.take_events() {
-            if event.connection != self.connection {
-                continue;
-            }
+        for event in state.take_events_for(self.connection) {
             match encode_event(&event, self.sequence, &mut buffer) {
                 Ok(size) => {
                     self.transport.send(&buffer[..size], &[])?;

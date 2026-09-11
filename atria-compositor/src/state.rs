@@ -529,7 +529,7 @@ impl CompositorState {
                 self.allocate_client(connection, new_id, ObjectKind::Registry, Object::Registry)?;
                 // A registry that advertises nothing is a client that can reach nothing, so the
                 // announcements are part of creating it rather than a later step.
-                self.announce_globals(connection);
+                self.announce_globals(connection, new_id);
                 Ok(())
             }
             ClientRequest::Bind {
@@ -1507,15 +1507,17 @@ impl CompositorState {
         };
         let connections: Vec<_> = self.connections.keys().copied().collect();
         for connection in connections {
-            self.push_event(
-                connection,
-                ObjectId::DISPLAY,
-                EventKind::Global {
-                    name,
-                    interface: global.interface,
-                    version: global.version,
-                },
-            );
+            for registry in self.registries_of(connection) {
+                self.push_event(
+                    connection,
+                    registry,
+                    EventKind::Global {
+                        name,
+                        interface: global.interface,
+                        version: global.version,
+                    },
+                );
+            }
         }
     }
 
@@ -1526,17 +1528,19 @@ impl CompositorState {
         }
         let connections: Vec<_> = self.connections.keys().copied().collect();
         for connection in connections {
-            self.push_event(
-                connection,
-                ObjectId::DISPLAY,
-                EventKind::GlobalRemove { name },
-            );
+            for registry in self.registries_of(connection) {
+                self.push_event(connection, registry, EventKind::GlobalRemove { name });
+            }
         }
         true
     }
 
     /// Every global the registry advertises, as the events a fresh registry receives.
-    fn announce_globals(&mut self, connection: ConnectionId) {
+    ///
+    /// Addressed to the registry, not to the display. An opcode is local to its interface, so the
+    /// object a message names is the only thing that says which interface to read it as —
+    /// `registry.global` and `display.error` are both opcode zero.
+    fn announce_globals(&mut self, connection: ConnectionId, registry: ObjectId) {
         let announcements: Vec<_> = self
             .globals
             .iter()
@@ -1545,7 +1549,7 @@ impl CompositorState {
         for (name, interface, version) in announcements {
             self.push_event(
                 connection,
-                ObjectId::DISPLAY,
+                registry,
                 EventKind::Global {
                     name,
                     interface,
@@ -1553,6 +1557,20 @@ impl CompositorState {
                 },
             );
         }
+    }
+
+    /// Every registry a connection holds, so an announcement reaches each of them.
+    fn registries_of(&self, connection: ConnectionId) -> Vec<ObjectId> {
+        self.connections
+            .get(&connection)
+            .map(|client| {
+                client
+                    .registry
+                    .ids()
+                    .filter(|id| client.registry.kind_of(*id) == Some(ObjectKind::Registry))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Take a global at an identifier the client chose.
@@ -1704,6 +1722,28 @@ impl CompositorState {
         take(&mut self.events)
     }
 
+    /// Take the events queued for one connection, leaving everyone else's where they are.
+    ///
+    /// A server writing to several clients cannot drain the whole queue to serve one of them:
+    /// every other client's events would be taken and thrown away by a session they do not belong
+    /// to. Whichever client was written to first would silently eat the rest.
+    pub fn take_events_for(&mut self, connection: ConnectionId) -> Vec<Event> {
+        let mut mine = Vec::new();
+        let mut theirs = Vec::new();
+        for event in take(&mut self.events) {
+            if event.connection == connection {
+                mine.push(event);
+            } else {
+                theirs.push(event);
+            }
+        }
+        self.events = theirs;
+        if let Some(client) = self.connections.get_mut(&connection) {
+            client.pending_events = 0;
+        }
+        mine
+    }
+
     pub fn close_connection(&mut self, connection: ConnectionId) -> Teardown {
         let Some(mut client) = self.connections.remove(&connection) else {
             return Teardown::default();
@@ -1718,6 +1758,16 @@ impl CompositorState {
         // A connection going takes its windows with it, so the handles a shell held for them are
         // retired. A shell asking about one afterwards is told the window is gone rather than
         // reaching whatever next occupied the number.
+        //
+        // And it is told, rather than left to notice. A client dying is the ordinary way a window
+        // disappears, so a shell that only heard about deliberate destruction would keep drawing
+        // windows whose programs had crashed.
+        let retired: Vec<_> = self
+            .toplevels
+            .iter()
+            .filter(|(_, (owner, _))| *owner == connection)
+            .map(|(handle, _)| *handle)
+            .collect();
         self.toplevels.retain(|_, (owner, _)| *owner != connection);
         self.scene
             .positions
@@ -1734,6 +1784,9 @@ impl CompositorState {
             .is_some_and(|key| key.connection == connection)
         {
             self.pointer_target = None;
+        }
+        for handle in retired {
+            self.tell_shells(EventKind::ShellToplevelGone { handle });
         }
         Teardown { destroyed }
     }
