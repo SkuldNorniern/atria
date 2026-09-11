@@ -15,8 +15,8 @@ use std::process::exit;
 
 use atria_protocol::interface::{Interface, Operation};
 use atria_protocol::message::{
-    Bind, EncodePayload, NewId, RegistryGlobal, SeatHandle, ShellHandle, ShellInteraction,
-    ShellPlace, ShellToplevel, encode_message,
+    Bind, EncodePayload, NewId, RegistryGlobal, SeatHandle, SeatPoint, ShellHandle,
+    ShellInteraction, ShellPlace, ShellToplevel, encode_message,
 };
 use atria_protocol::wire::{Frame, MAX_MESSAGE_SIZE};
 use atria_protocol::{ObjectId, Opcode};
@@ -41,6 +41,9 @@ const CASCADE_STEP: i32 = 32;
 
 /// How far the cascade runs before starting again, so windows stay on the output.
 const CASCADE_WRAP: i32 = 8;
+
+/// The strip at the top of a window that the shell treats as its own to drag by.
+const TITLE_STRIP: i32 = 28;
 
 fn id(raw: u32) -> ObjectId {
     ObjectId::from_raw(raw)
@@ -85,6 +88,8 @@ fn main() {
     // the same window arrives again whenever anything about it changes — a shell that counted
     // arrivals would move a window every time it was renamed.
     let mut known: Vec<u64> = inherited;
+    let mut dragging: Option<u64> = None;
+    let mut grabbed_at: Option<(i32, i32)> = None;
     loop {
         match shell.next_event() {
             Some(Told::Toplevel(handle)) => {
@@ -99,7 +104,7 @@ fn main() {
                 known.retain(|known| *known != handle);
                 println!("elysium0: window {handle} is gone");
             }
-            Some(Told::Pressed(handle)) => {
+            Some(Told::Pressed { handle, x, y }) => {
                 // Click to focus and raise. This is the whole of it: Atria routes the press to
                 // the application as well, so the client gets its click and the shell gets to
                 // decide what the press means for arrangement.
@@ -114,6 +119,46 @@ fn main() {
                     &SeatHandle { seat: SEAT, handle },
                 );
                 println!("elysium0: raised and focused {handle}");
+
+                // A press in the top strip is a press on the window rather than in it. There is
+                // no chrome drawn there yet, so the strip stands in for a title bar until
+                // Elysium owns decoration of its own.
+                if y < TITLE_STRIP {
+                    shell.request(
+                        id(CONTROL),
+                        Operation::ShellControlGrab,
+                        &SeatHandle { seat: SEAT, handle },
+                    );
+                    dragging = Some(handle);
+                    // Where in the window the press landed is the offset to hold for the whole
+                    // drag. Taking it from the first motion instead would lose however far the
+                    // pointer travelled between the press and that motion, and the window would
+                    // jump by exactly that much.
+                    grabbed_at = Some((x, y));
+                }
+            }
+            Some(Told::GrabMotion(x, y)) => {
+                let Some(handle) = dragging else {
+                    continue;
+                };
+                // The first report fixes where in the window the pointer was, so the window moves
+                // with the pointer instead of jumping its own top-left corner to it.
+                let Some((offset_x, offset_y)) = grabbed_at else {
+                    continue;
+                };
+                shell.request(
+                    id(CONTROL),
+                    Operation::ShellControlPlace,
+                    &ShellPlace {
+                        handle,
+                        x: x - offset_x,
+                        y: y - offset_y,
+                    },
+                );
+            }
+            Some(Told::GrabEnd) => {
+                dragging = None;
+                grabbed_at = None;
             }
             Some(Told::FocusChanged(handle)) => {
                 println!("elysium0: focus is now {handle}");
@@ -129,8 +174,16 @@ enum Told {
     Toplevel(u64),
     ToplevelGone(u64),
     FocusChanged(u64),
-    /// Somebody pressed a window. Which window, and nothing about the press itself.
-    Pressed(u64),
+    /// Somebody pressed a window, and where in it. Nothing about the press itself.
+    Pressed {
+        handle: u64,
+        x: i32,
+        y: i32,
+    },
+    /// Where the pointer went while this shell held it.
+    GrabMotion(i32, i32),
+    /// The shell no longer holds the pointer.
+    GrabEnd,
     Other,
 }
 
@@ -218,7 +271,19 @@ impl Shell {
         if opcode == Operation::ShellControlInteraction.opcode() {
             return ShellInteraction::decode(frame.payload)
                 .ok()
-                .map(|payload| Told::Pressed(payload.handle));
+                .map(|payload| Told::Pressed {
+                    handle: payload.handle,
+                    x: payload.x,
+                    y: payload.y,
+                });
+        }
+        if opcode == Operation::ShellControlGrabMotion.opcode() {
+            return SeatPoint::decode(frame.payload)
+                .ok()
+                .map(|payload| Told::GrabMotion(payload.x, payload.y));
+        }
+        if opcode == Operation::ShellControlGrabEnd.opcode() {
+            return Some(Told::GrabEnd);
         }
         Some(Told::Other)
     }
