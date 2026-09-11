@@ -65,6 +65,9 @@ pub enum Interface {
     Pointer,
     /// One seat's keyboard, as the client holding focus sees it.
     Keyboard,
+    /// Claiming key chords. Separate from the keyboard because it is a different power: being
+    /// told that one chord fired, rather than seeing everything typed.
+    Shortcuts,
 }
 
 /// Whether an operation travels from the client or to it.
@@ -175,6 +178,9 @@ pub enum Operation {
     KeyboardLeave,
     KeyboardKey,
     KeyboardModifiers,
+    ShortcutsRegister,
+    ShortcutsUnregister,
+    ShortcutsTriggered,
 }
 
 /// Shorthand for one table row.
@@ -352,6 +358,23 @@ impl Operation {
                 "modifiers",
                 &[U32, U32, U32, U32, U32],
             ),
+            // A chord is a physical position and the modifiers held with it. The holder names the
+            // chord; it is never told about keys it did not name.
+            Self::ShortcutsRegister => spec(
+                I::Shortcuts,
+                Method,
+                0,
+                "register",
+                &[U32, U64, U32, U32, U32],
+            ),
+            Self::ShortcutsUnregister => spec(I::Shortcuts, Method, 1, "unregister", &[U32]),
+            Self::ShortcutsTriggered => spec(
+                I::Shortcuts,
+                Event,
+                0,
+                "triggered",
+                &[U32, U64, U32, U64, U32],
+            ),
         }
     }
 
@@ -390,6 +413,7 @@ impl Interface {
             Self::Seat => "atria_seat",
             Self::Pointer => "atria_pointer",
             Self::Keyboard => "atria_keyboard",
+            Self::Shortcuts => "atria_shortcuts",
         }
     }
 
@@ -422,6 +446,7 @@ impl Interface {
             Self::Seat => &[O::SeatGetPointer, O::SeatGetKeyboard],
             Self::Pointer => &[O::PointerDestroy],
             Self::Keyboard => &[O::KeyboardDestroy],
+            Self::Shortcuts => &[O::ShortcutsRegister, O::ShortcutsUnregister],
             Self::ShellControl => &[
                 O::ShellControlConfigure,
                 O::ShellControlPlace,
@@ -446,6 +471,7 @@ impl Interface {
             Self::Surface => &[O::SurfaceEnter, O::SurfaceLeave, O::SurfaceFrameDone],
             Self::Toplevel => &[O::ToplevelConfigure, O::ToplevelClose],
             Self::Seat => &[],
+            Self::Shortcuts => &[O::ShortcutsTriggered],
             Self::Keyboard => &[
                 O::KeyboardEnter,
                 O::KeyboardLeave,
@@ -517,6 +543,7 @@ pub const INTERFACES: &[Interface] = &[
     Interface::Seat,
     Interface::Pointer,
     Interface::Keyboard,
+    Interface::Shortcuts,
 ];
 
 /// The states a toplevel may be told it is in.

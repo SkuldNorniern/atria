@@ -21,12 +21,22 @@ pub enum Capability {
     ShellControl,
     /// Change what a display does — mode, scale, arrangement, virtual outputs.
     OutputControl,
-    /// Observe input the focused client does not receive. A keyboard shortcut needs this.
+    /// Observe input outside the holder's own routing target.
+    ///
+    /// Not what an ordinary global shortcut needs: a shell registers the chord it wants and is
+    /// told when it fires, without seeing anything else. This is for the cases that genuinely
+    /// need everything — input diagnostics, accessibility technologies, explicit automation.
     GlobalInputObservation,
     /// Synthesise input. Accessibility and automation need it; nothing else should have it.
     InputInjection,
     /// Hold the screen against every other client, and be the only thing drawing on it.
     LockScreen,
+    /// Claim a key chord, and be told when it is pressed.
+    ///
+    /// Far less than observing input: the holder learns that the chord it asked for happened, and
+    /// nothing about anything else. A shell needs this; it does not need to watch what is typed
+    /// into a password field to discover that Super+Q was pressed.
+    ShortcutControl,
 }
 
 impl Capability {
@@ -69,6 +79,7 @@ impl Capability {
             Self::GlobalInputObservation => "global_input_observation",
             Self::InputInjection => "input_injection",
             Self::LockScreen => "lock_screen",
+            Self::ShortcutControl => "shortcut_control",
         }
     }
 }

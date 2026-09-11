@@ -1549,3 +1549,126 @@ impl EncodePayload for KeyboardModifiers {
         encoder.write_u32(self.epoch)
     }
 }
+
+/// A chord a holder wants to be told about.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ShortcutRegistration {
+    /// The holder's own name for it, quoted back when it fires.
+    pub shortcut: u32,
+    pub seat: u64,
+    /// A USB HID Keyboard/Keypad usage.
+    pub trigger: u32,
+    pub modifiers: u32,
+    /// Whether the modifiers must match exactly, or merely all be held.
+    pub mode: u32,
+}
+
+impl ShortcutRegistration {
+    /// # Errors
+    ///
+    /// Returns [`DecodeError`] when the payload is not the five fields the table names.
+    pub fn decode(input: &[u8]) -> Result<Self, DecodeError> {
+        let mut decoder = Decoder::new(input);
+        let shortcut = decoder.read_u32()?;
+        let seat = read_u64(&mut decoder)?;
+        let value = Self {
+            shortcut,
+            seat,
+            trigger: decoder.read_u32()?,
+            modifiers: decoder.read_u32()?,
+            mode: decoder.read_u32()?,
+        };
+        decoder.finish()?;
+        Ok(value)
+    }
+}
+
+impl EncodePayload for ShortcutRegistration {
+    fn encoded_len(&self) -> Result<usize, EncodeError> {
+        Ok(24)
+    }
+
+    fn encode(&self, encoder: &mut Encoder<'_>) -> Result<(), EncodeError> {
+        encoder.write_u32(self.shortcut)?;
+        write_u64(encoder, self.seat)?;
+        encoder.write_u32(self.trigger)?;
+        encoder.write_u32(self.modifiers)?;
+        encoder.write_u32(self.mode)
+    }
+}
+
+/// A shortcut, by the name its holder gave it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ShortcutName {
+    pub shortcut: u32,
+}
+
+impl ShortcutName {
+    /// # Errors
+    ///
+    /// Returns [`DecodeError`] when the payload is not one name.
+    pub fn decode(input: &[u8]) -> Result<Self, DecodeError> {
+        let mut decoder = Decoder::new(input);
+        let value = Self {
+            shortcut: decoder.read_u32()?,
+        };
+        decoder.finish()?;
+        Ok(value)
+    }
+}
+
+impl EncodePayload for ShortcutName {
+    fn encoded_len(&self) -> Result<usize, EncodeError> {
+        Ok(4)
+    }
+
+    fn encode(&self, encoder: &mut Encoder<'_>) -> Result<(), EncodeError> {
+        encoder.write_u32(self.shortcut)
+    }
+}
+
+/// A chord fired. Says which one, and nothing about anything else pressed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ShortcutTriggered {
+    pub shortcut: u32,
+    pub seat: u64,
+    pub serial: u32,
+    pub time_ns: u64,
+    pub epoch: u32,
+}
+
+impl ShortcutTriggered {
+    /// # Errors
+    ///
+    /// Returns [`DecodeError`] when the payload is not the five fields the table names.
+    pub fn decode(input: &[u8]) -> Result<Self, DecodeError> {
+        let mut decoder = Decoder::new(input);
+        let shortcut = decoder.read_u32()?;
+        let seat = read_u64(&mut decoder)?;
+        let serial = decoder.read_u32()?;
+        let time_ns = read_u64(&mut decoder)?;
+        let value = Self {
+            shortcut,
+            seat,
+            serial,
+            time_ns,
+            epoch: decoder.read_u32()?,
+        };
+        decoder.finish()?;
+        Ok(value)
+    }
+}
+
+impl EncodePayload for ShortcutTriggered {
+    fn encoded_len(&self) -> Result<usize, EncodeError> {
+        Ok(28)
+    }
+
+    fn encode(&self, encoder: &mut Encoder<'_>) -> Result<(), EncodeError> {
+        encoder.write_u32(self.shortcut)?;
+        write_u64(encoder, self.seat)?;
+        encoder.write_u32(self.serial)?;
+        write_u64(encoder, self.time_ns)?;
+        encoder.write_u32(self.epoch)
+    }
+}
