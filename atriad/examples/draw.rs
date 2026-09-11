@@ -227,6 +227,14 @@ fn main() {
             );
             continue;
         }
+        // A shell asking a window to close is a request, not an instruction. This client obeys
+        // it; one with unsaved work would be entitled to ask first.
+        if frame.header.object_id == id(TOPLEVEL)
+            && frame.header.opcode.into_raw() == Operation::ToplevelClose.opcode()
+        {
+            println!("draw: the shell asked this window to close");
+            return;
+        }
         if frame.header.object_id != id(KEYBOARD)
             || frame.header.opcode.into_raw() != Operation::KeyboardKey.opcode()
         {

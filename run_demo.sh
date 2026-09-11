@@ -10,15 +10,18 @@ set -euo pipefail
 #   ./run_demo.sh              listens for a viewer on 127.0.0.1:5900
 #   ATRIA_VNC=:5901 ./run_demo.sh
 #   ATRIA_CLIENTS=0 ./run_demo.sh   server and shell only, nothing drawn
-#   ELYSIUM_MODIFIER=alt ./run_demo.sh
+#   ELYSIUM_MODIFIER=super ./run_demo.sh
 
 VNC_ADDRESS="${ATRIA_VNC:-0.0.0.0:5901}"
 SOCKET="${ATRIA_SOCKET:-/tmp/atria-demo.sock}"
 SHELL_SOCKET="${ATRIA_SHELL_SOCKET:-/tmp/atria-demo-shell.sock}"
 CLIENTS="${ATRIA_CLIENTS:-3}"
-# Which modifier the shell's chords use. A desktop the viewer runs on usually keeps Super for
-# itself, so a remote session generally wants ELYSIUM_MODIFIER=alt.
-MODIFIER="${ELYSIUM_MODIFIER:-super}"
+# Which modifier the shell's chords use.
+#
+# A desktop the viewer runs on usually keeps Super for itself. On macOS the Option key composes:
+# Option+Q arrives as the character it produced rather than as the Q key, so a chord on Alt can
+# never see it. Control composes nothing and gets through everywhere.
+MODIFIER="${ELYSIUM_MODIFIER:-control}"
 
 cargo build -p atriad --bin atriad --example draw --example elysium0
 
