@@ -490,11 +490,16 @@ fn a_clients_pixels_reach_a_frame_and_its_buffer_comes_back() {
     .unwrap_or_else(|error| panic!("the output is usable: {error:?}"));
     let mut sink = HeadlessSink::default();
 
+    let commit = state
+        .surface_snapshot(session.connection(), id(258))
+        .unwrap_or_else(|| panic!("the surface has content"))
+        .commit;
     let report = present_for(
         &mut presenter,
         &mut state,
         &mut session,
         id(257),
+        commit,
         1_000,
         &mut sink,
     )
