@@ -492,54 +492,63 @@ fn blit_surface(
     offset: Point,
     frame: &mut Frame,
 ) -> Result<(), ComposeError> {
+    let overflow = || ComposeError::GeometryOverflow(surface);
     let (origin_x, origin_y) = checked_origin(surface, position, offset)?;
-    let output_width = i64::from(frame.size().width);
-    let output_height = i64::from(frame.size().height);
     let pixel_bytes = u64::from(frame.layout().bytes_per_pixel());
     let source_stride = u64::from(image.size.width)
         .checked_mul(pixel_bytes)
-        .ok_or(ComposeError::GeometryOverflow(surface))?;
+        .ok_or_else(overflow)?;
     let destination_stride = u64::from(frame.stride());
-    for source_y in 0..image.size.height {
-        let destination_y = origin_y
-            .checked_add(i64::from(source_y))
-            .ok_or(ComposeError::GeometryOverflow(surface))?;
-        if destination_y < 0 || destination_y >= output_height {
-            continue;
-        }
-        for source_x in 0..image.size.width {
-            let destination_x = origin_x
-                .checked_add(i64::from(source_x))
-                .ok_or(ComposeError::GeometryOverflow(surface))?;
-            if destination_x < 0 || destination_x >= output_width {
-                continue;
-            }
-            let source_start = u64::from(source_y)
-                .checked_mul(source_stride)
-                .and_then(|offset| {
-                    u64::from(source_x)
-                        .checked_mul(pixel_bytes)
-                        .and_then(|x| offset.checked_add(x))
-                })
-                .ok_or(ComposeError::GeometryOverflow(surface))?;
-            let destination_start = u64::try_from(destination_y)
-                .ok()
-                .and_then(|y| y.checked_mul(destination_stride))
-                .and_then(|offset| {
-                    u64::try_from(destination_x)
-                        .ok()
-                        .and_then(|x| x.checked_mul(pixel_bytes))
-                        .and_then(|x| offset.checked_add(x))
-                })
-                .ok_or(ComposeError::GeometryOverflow(surface))?;
-            copy_range(
-                &image.bytes,
-                source_start,
-                frame.bytes_mut(),
-                destination_start,
-                pixel_bytes,
-            )?;
-        }
+
+    // The visible part, in the surface's own coordinates. Clipped once, not once per pixel.
+    let width = i64::from(image.size.width);
+    let height = i64::from(image.size.height);
+    let span = |origin: i64, extent: i64, limit: i64| {
+        let first = origin.checked_neg()?.clamp(0, extent);
+        let last = limit.checked_sub(origin)?.clamp(0, extent);
+        Some((first, last))
+    };
+    let (x_first, x_last) =
+        span(origin_x, width, i64::from(frame.size().width)).ok_or_else(overflow)?;
+    let (y_first, y_last) =
+        span(origin_y, height, i64::from(frame.size().height)).ok_or_else(overflow)?;
+    if x_first >= x_last || y_first >= y_last {
+        return Ok(());
+    }
+
+    let row_bytes = u64::try_from(x_last - x_first)
+        .ok()
+        .and_then(|columns| columns.checked_mul(pixel_bytes))
+        .ok_or_else(overflow)?;
+    let source_x = u64::try_from(x_first)
+        .ok()
+        .and_then(|x| x.checked_mul(pixel_bytes))
+        .ok_or_else(overflow)?;
+    let destination_x = origin_x
+        .checked_add(x_first)
+        .and_then(|x| u64::try_from(x).ok())
+        .and_then(|x| x.checked_mul(pixel_bytes))
+        .ok_or_else(overflow)?;
+
+    for row in y_first..y_last {
+        let source_start = u64::try_from(row)
+            .ok()
+            .and_then(|y| y.checked_mul(source_stride))
+            .and_then(|offset| offset.checked_add(source_x))
+            .ok_or_else(overflow)?;
+        let destination_start = origin_y
+            .checked_add(row)
+            .and_then(|y| u64::try_from(y).ok())
+            .and_then(|y| y.checked_mul(destination_stride))
+            .and_then(|offset| offset.checked_add(destination_x))
+            .ok_or_else(overflow)?;
+        copy_range(
+            &image.bytes,
+            source_start,
+            frame.bytes_mut(),
+            destination_start,
+            row_bytes,
+        )?;
     }
     Ok(())
 }
