@@ -145,6 +145,50 @@ pub fn present_committed(
     Ok(report)
 }
 
+/// Composite every client's content into one frame, then deliver what that produced to each.
+///
+/// The scene's stacking order is compositor-wide, so this walks it once and reads each surface's
+/// pixels through the session that owns them. A buffer belongs to the client that handed over the
+/// memory behind it, and no other session can read it — which is why staging is per-session even
+/// though the frame is not.
+///
+/// A surface whose session has gone is skipped rather than failing the frame. The other clients
+/// are still drawing, and one departure is not everyone's.
+///
+/// # Errors
+///
+/// Returns [`PresentFailure`] when a buffer cannot be read or the frame cannot be composed.
+pub fn present_all<T: Transport>(
+    presenter: &mut Presenter,
+    state: &mut CompositorState,
+    sessions: &mut [Session<T>],
+    timestamp_ns: u64,
+    sink: &mut impl FrameSink,
+) -> Result<FrameReport, PresentFailure> {
+    let order: Vec<_> = state.stacking_order().to_vec();
+    for surface in order {
+        let Some(buffer) = state
+            .surface_snapshot(surface.connection, surface.object_id)
+            .map(|snapshot| snapshot.buffer)
+        else {
+            continue;
+        };
+        let Some(session) = sessions
+            .iter()
+            .find(|session| session.connection() == surface.connection)
+        else {
+            continue;
+        };
+        presenter.stage(state, surface.connection, session.memory(), buffer)?;
+    }
+
+    let report = presenter.present(state, timestamp_ns, sink)?;
+    for session in sessions.iter_mut() {
+        let _ = session.deliver(state);
+    }
+    Ok(report)
+}
+
 /// Stage and present one client's committed content, then deliver whatever that produced.
 ///
 /// # Errors

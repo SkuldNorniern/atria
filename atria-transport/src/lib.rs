@@ -16,7 +16,7 @@ pub use error::TransportError;
 pub use memory::SharedMemoryStore;
 
 use std::mem::take;
-use std::os::fd::{AsFd, OwnedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
 use atria_compositor::{HandleResolver, ResolveError, SharedMemory};
 use atria_protocol::wire::{HEADER_SIZE, HandleIndex, HandleKind, MAX_MESSAGE_SIZE};
@@ -149,6 +149,14 @@ impl UnixTransport {
     #[must_use]
     pub fn into_socket(self) -> OwnedFd {
         self.socket
+    }
+}
+
+/// Lets a server wait on several clients at once. Readiness is the platform's, so it is exposed
+/// on the platform's transport rather than on the trait every transport shares.
+impl AsFd for UnixTransport {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.socket.as_fd()
     }
 }
 

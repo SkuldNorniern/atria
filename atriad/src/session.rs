@@ -72,6 +72,15 @@ impl<T: Transport> Session<T> {
         self.connection
     }
 
+    /// The transport underneath, for a caller that needs the platform's readiness primitive.
+    ///
+    /// Serving several clients means waiting on all of them at once, and what "ready" means is
+    /// the transport's to say. The session does not know and does not need to.
+    #[must_use]
+    pub const fn transport(&self) -> &T {
+        &self.transport
+    }
+
     /// The memory this client has handed over, for a caller about to read pixels out of it.
     #[must_use]
     pub const fn memory(&self) -> &T::Memory {
