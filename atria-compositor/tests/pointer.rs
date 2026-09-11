@@ -338,3 +338,106 @@ fn resetting_routing_starts_an_epoch_a_client_can_tell_apart() {
         "a grab cannot outlive the routing it belonged to"
     );
 }
+
+/// A shell may hold the pointer for a drag, and only for as long as the button is down.
+///
+/// This is what moving a window is built from. It is bounded by the button on purpose: a shell
+/// that could hold the pointer for as long as it liked would be watching everything a person did,
+/// which is a different power from being able to move a window.
+#[test]
+fn a_shell_holds_the_pointer_only_while_the_button_that_started_it_is_down() {
+    let mut state = server();
+    state
+        .advertise_global(ObjectKind::ShellControl, 1)
+        .unwrap_or_else(|| panic!("the authority is advertised"));
+    state
+        .advertise_global(ObjectKind::Shell, 1)
+        .unwrap_or_else(|| panic!("the role factory is advertised"));
+
+    let (client, surface) = window(&mut state, 100, Point { x: 0, y: 0 });
+    state
+        .dispatch(
+            client,
+            ClientRequest::GetToplevel {
+                surface: surface.object_id,
+                new_id: id(257),
+            },
+        )
+        .unwrap_or_else(|error| panic!("a window role: {error:?}"));
+    let handle = state
+        .toplevel_handle(client, id(257))
+        .unwrap_or_else(|| panic!("the window has a handle"));
+
+    let shell = state
+        .connect(
+            CapabilitySet::default_grants().with(Capability::ShellControl),
+            CapabilitySet::empty(),
+        )
+        .unwrap_or_else(|error| panic!("a shell connects: {error:?}"));
+    state
+        .grant_capability(shell, Capability::ShellControl)
+        .unwrap_or_else(|error| panic!("the grant: {error:?}"));
+
+    // Nothing is pressed, so there is nothing to hold.
+    assert!(
+        state.shell_grab(shell, SeatId(1), handle, id(3)).is_err(),
+        "a grab that did not begin in a press would have nothing to end it"
+    );
+
+    state.move_pointer(Point { x: 50, y: 50 }, 1_000);
+    state.pointer_button(1, true, 2_000);
+    let _ = state.take_events();
+    state
+        .shell_grab(shell, SeatId(1), handle, id(3))
+        .unwrap_or_else(|error| panic!("a grab during a press: {error:?}"));
+
+    assert!(
+        kinds_for(&mut state, client)
+            .iter()
+            .any(|kind| matches!(kind, EventKind::PointerLeave { .. })),
+        "the client stops seeing the pointer, rather than being left waiting for a release"
+    );
+
+    state.move_pointer(Point { x: 300, y: 400 }, 3_000);
+    let held: Vec<_> = state
+        .take_events()
+        .into_iter()
+        .filter(|event| event.connection == shell)
+        .map(|event| event.kind)
+        .collect();
+    assert!(
+        held.iter().any(|kind| matches!(
+            kind,
+            EventKind::ShellGrabMotion { position, .. } if *position == Point { x: 300, y: 400 }
+        )),
+        "the shell is told where the pointer went, in the scene's coordinates"
+    );
+
+    state.pointer_button(1, false, 4_000);
+    let ended: Vec<_> = state
+        .take_events()
+        .into_iter()
+        .filter(|event| event.connection == shell)
+        .map(|event| event.kind)
+        .collect();
+    assert!(
+        ended
+            .iter()
+            .any(|kind| matches!(kind, EventKind::ShellGrabEnd { .. })),
+        "the button coming up ends it, and the shell is told so"
+    );
+
+    state.move_pointer(Point { x: 10, y: 10 }, 5_000);
+    let after: Vec<_> = state
+        .take_events()
+        .into_iter()
+        .filter(|event| event.connection == shell)
+        .map(|event| event.kind)
+        .collect();
+    assert!(
+        !after
+            .iter()
+            .any(|kind| matches!(kind, EventKind::ShellGrabMotion { .. })),
+        "and the shell stops seeing the pointer the moment the grab is over"
+    );
+}
