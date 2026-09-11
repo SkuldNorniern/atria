@@ -4,7 +4,7 @@
 //! socket and the same wire format a real client uses — there is no in-process shortcut, because
 //! a shortcut would prove the shortcut works.
 //!
-//! Run with: cargo run --example draw -- <socket-path>
+//! Run with: cargo run --example draw -- <socket-path> [width height rrggbb]
 
 use std::env::args;
 use std::ffi::c_void;
@@ -26,10 +26,7 @@ use libc::{
     off_t, pwrite, sa_family_t, sockaddr, sockaddr_un, socket as make_socket, socklen_t,
 };
 
-const WIDTH: u32 = 400;
-const HEIGHT: u32 = 300;
 const BYTES_PER_PIXEL: u32 = 4;
-const COLOUR: [u8; 4] = [0x2f, 0x9e, 0xd8, 0xff];
 
 const REGISTRY: u32 = 2;
 const COMPOSITOR: u32 = 3;
@@ -44,9 +41,13 @@ fn id(raw: u32) -> ObjectId {
 
 fn main() {
     let path = args().nth(1).unwrap_or_else(|| {
-        eprintln!("draw: usage: draw <socket-path>");
+        eprintln!("draw: usage: draw <socket-path> [width height rrggbb]");
         exit(2);
     });
+    // Size and colour are arguments so that two of these are telling apart in one frame.
+    let width = number(2, 400);
+    let height = number(3, 300);
+    let colour = colour(4, 0x2f_9e_d8);
 
     let mut client = Client::new(connect_to(&path));
 
@@ -83,12 +84,12 @@ fn main() {
         },
     );
 
-    let stride = WIDTH * BYTES_PER_PIXEL;
-    let bytes = (stride * HEIGHT) as usize;
+    let stride = width * BYTES_PER_PIXEL;
+    let bytes = (stride * height) as usize;
     let region = memory(bytes);
     let mut pixels = Vec::with_capacity(bytes);
-    for _ in 0..(WIDTH * HEIGHT) {
-        pixels.extend_from_slice(&COLOUR);
+    for _ in 0..(width * height) {
+        pixels.extend_from_slice(&colour);
     }
     write_at(&region, 0, &pixels);
 
@@ -108,8 +109,8 @@ fn main() {
         &CreateBuffer {
             new_id: id(BUFFER),
             offset: 0,
-            width: WIDTH,
-            height: HEIGHT,
+            width,
+            height,
             stride,
             format: FORMAT_XRGB8888,
         },
@@ -136,8 +137,8 @@ fn main() {
         &DamageBuffer {
             x: 0,
             y: 0,
-            width: WIDTH,
-            height: HEIGHT,
+            width,
+            height,
         },
     );
     client.request(
@@ -149,7 +150,7 @@ fn main() {
         },
     );
 
-    println!("draw: committed {WIDTH}x{HEIGHT}");
+    println!("draw: committed {width}x{height}");
 
     // Held open deliberately. A connection that closes takes its buffers with it, and there
     // would be nothing left to look at.
@@ -158,6 +159,28 @@ fn main() {
             return;
         }
     }
+}
+
+/// A positional argument, or a default when it is absent or unreadable.
+fn number(position: usize, fallback: u32) -> u32 {
+    args()
+        .nth(position)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(fallback)
+}
+
+/// A positional `rrggbb` argument, laid out the way a buffer stores it.
+fn colour(position: usize, fallback: u32) -> [u8; 4] {
+    let packed = args()
+        .nth(position)
+        .and_then(|value| u32::from_str_radix(&value, 16).ok())
+        .unwrap_or(fallback);
+    [
+        ((packed >> 16) & 0xff) as u8,
+        ((packed >> 8) & 0xff) as u8,
+        (packed & 0xff) as u8,
+        0xff,
+    ]
 }
 
 fn connect_to(path: &str) -> UnixTransport {
