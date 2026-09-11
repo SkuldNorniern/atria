@@ -154,8 +154,8 @@ fn the_documented_sizes_are_the_computed_sizes() {
         (Operation::ToplevelConfigure, 0x1c),
         (Operation::ToplevelClose, 0x0c),
         (Operation::OutputIdentity, 0x1c),
-        (Operation::OutputGeometry, 0x18),
-        (Operation::OutputMode, 0x1c),
+        (Operation::OutputGeometry, 0x20),
+        (Operation::OutputMode, 0x18),
         (Operation::OutputScale, 0x14),
         (Operation::OutputDone, 0x0c),
     ];

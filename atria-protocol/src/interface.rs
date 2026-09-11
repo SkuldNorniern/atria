@@ -227,8 +227,10 @@ impl Operation {
             Self::ToplevelClose => spec(I::Toplevel, Event, 1, "close", &[]),
 
             Self::OutputIdentity => spec(I::Output, Event, 0, "identity", &[U64, U64]),
-            Self::OutputGeometry => spec(I::Output, Event, 1, "geometry", &[U32, U32, U32]),
-            Self::OutputMode => spec(I::Output, Event, 2, "mode", &[U32, U32, U32, U32]),
+            Self::OutputGeometry => {
+                spec(I::Output, Event, 1, "geometry", &[I32, I32, U32, U32, U32])
+            }
+            Self::OutputMode => spec(I::Output, Event, 2, "mode", &[U32, U32, U32]),
             Self::OutputScale => spec(I::Output, Event, 3, "scale", &[U32, U32]),
             Self::OutputDone => spec(I::Output, Event, 4, "done", &[]),
         }
