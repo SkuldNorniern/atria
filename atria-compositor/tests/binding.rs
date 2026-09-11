@@ -144,6 +144,7 @@ fn operations_the_wire_defines_and_the_state_machine_does_not_model_are_reported
         Operation::SurfaceAttach,
         Operation::SurfaceDamageBuffer,
         Operation::SurfaceCommit,
+        Operation::SurfaceFrame,
         Operation::SurfaceDestroy,
         Operation::BufferDestroy,
         Operation::ShellGetToplevel,
