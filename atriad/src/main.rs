@@ -158,6 +158,22 @@ fn run() -> io::Result<()> {
 
     let mut sessions: Vec<Session<UnixTransport>> = Vec::new();
     let mut composed = 0_u64;
+
+    // Composed once before anything has connected. An output with nothing on it still has a
+    // current state, and a viewer attaching to an idle compositor must be shown that state rather
+    // than be left waiting for somebody else to draw.
+    if let Some(sink) = viewer.as_mut() {
+        composed += 1;
+        if let Err(error) = present_all(
+            &mut presenter,
+            &mut state,
+            &mut sessions,
+            composed,
+            &mut *sink,
+        ) {
+            eprintln!("atriad: could not compose an empty output: {error:?}");
+        }
+    }
     // A monotonic count, not a clock. Input events need an ordering, and nothing here has
     // measured a real one — calling this nanoseconds would be a timing claim with nothing
     // behind it.
