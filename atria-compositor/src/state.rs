@@ -9,10 +9,13 @@ use atria_protocol::capability::{Capability, CapabilitySet};
 use atria_protocol::error::ErrorCategory;
 
 use crate::error::StateError;
+use atria_protocol::interface::toplevel_state;
+
 use crate::model::{
     BufferDescriptor, BufferState, BufferTransport, ClientRequest, CommitId, ConnectionId, Damage,
     Event, EventKind, FocusEvent, ObjectKind, Point, Rect, SeatCapabilities, SeatSnapshot,
-    SessionSnapshot, Size, SurfaceKey, SurfaceRole, SurfaceSnapshot, pixel_format_is_known,
+    SessionSnapshot, Size, SurfaceKey, SurfaceRole, SurfaceSnapshot, TitleText,
+    pixel_format_is_known,
 };
 use atria_protocol::interface::Interface;
 
@@ -103,6 +106,7 @@ impl Error for NegotiationError {}
 enum Object {
     Display,
     Registry,
+    Toplevel(ToplevelState),
     /// A global the client bound. The compositor's resource behind it is not this object, so
     /// destroying it releases the reference and nothing else.
     Global,
@@ -162,6 +166,17 @@ struct BufferObject {
     source: Option<BufferSource>,
 }
 
+/// A surface given window semantics.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ToplevelState {
+    surface: ObjectId,
+    title: TitleText,
+    minimum: Option<Size>,
+    maximum: Option<Size>,
+    /// The serial of the most recent configure, so a commit answering it can be recognised.
+    last_configure: u32,
+}
+
 /// Where a buffer's pixels live: a region of memory a client handed over.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BufferSource {
@@ -215,6 +230,7 @@ pub struct CompositorState {
     /// reused after it is withdrawn — a client may still have one in flight.
     globals: BTreeMap<u32, Global>,
     next_global: u32,
+    next_configure: u32,
     server_limits: ServerLimits,
     limits: ConnectionLimits,
     next_connection: u64,
@@ -239,6 +255,7 @@ impl CompositorState {
                 .with(Capability::BufferImport),
             globals: BTreeMap::new(),
             next_global: 1,
+            next_configure: 1,
             server_limits,
             limits,
             next_connection: 1,
@@ -476,6 +493,21 @@ impl CompositorState {
                 version,
                 new_id,
             } => self.bind_global(connection, name, version, new_id),
+            ClientRequest::GetToplevel { surface, new_id } => {
+                self.get_toplevel(connection, surface, new_id)
+            }
+            ClientRequest::SetTitle { toplevel, title } => {
+                self.toplevel_mut(connection, toplevel)?.title = title;
+                Ok(())
+            }
+            ClientRequest::SetMinSize { toplevel, size } => {
+                self.toplevel_mut(connection, toplevel)?.minimum = Some(size);
+                Ok(())
+            }
+            ClientRequest::SetMaxSize { toplevel, size } => {
+                self.toplevel_mut(connection, toplevel)?.maximum = Some(size);
+                Ok(())
+            }
             ClientRequest::CreatePool { new_id, memory } => {
                 self.require_capability(connection, new_id, Capability::BufferImport)?;
                 self.check_kind_quota(connection, ObjectKind::ShmPool)?;
@@ -1532,6 +1564,125 @@ impl CompositorState {
         )
     }
 
+    /// Give a surface window semantics.
+    ///
+    /// A surface may take one role. A second is refused rather than replacing the first: the role
+    /// object carries state a client is entitled to keep, and silently discarding it would make
+    /// a mistake look like it worked.
+    fn get_toplevel(
+        &mut self,
+        connection: ConnectionId,
+        surface: ObjectId,
+        new_id: ObjectId,
+    ) -> Result<(), StateError> {
+        self.expect_kind(connection, surface, ObjectKind::Surface)?;
+        if self.role_of(connection, surface).is_some() {
+            return Err(StateError::InvalidState { object_id: surface });
+        }
+        self.check_kind_quota(connection, ObjectKind::Toplevel)?;
+        self.allocate_client(
+            connection,
+            new_id,
+            ObjectKind::Toplevel,
+            Object::Toplevel(ToplevelState {
+                surface,
+                title: TitleText::default(),
+                minimum: None,
+                maximum: None,
+                last_configure: 0,
+            }),
+        )
+    }
+
+    /// The role object a surface already has, if any.
+    fn role_of(&self, connection: ConnectionId, surface: ObjectId) -> Option<ObjectId> {
+        let client = self.connections.get(&connection)?;
+        client.registry.live.iter().find_map(|(id, entry)| {
+            matches!(&entry.value, Object::Toplevel(state) if state.surface == surface)
+                .then_some(*id)
+        })
+    }
+
+    fn toplevel_mut(
+        &mut self,
+        connection: ConnectionId,
+        toplevel: ObjectId,
+    ) -> Result<&mut ToplevelState, StateError> {
+        let client = self.connection_mut(connection)?;
+        let entry = client.registry.entry_mut(toplevel)?;
+        match &mut entry.value {
+            Object::Toplevel(state) => Ok(state),
+            _ => Err(StateError::WrongObjectType {
+                object_id: toplevel,
+                expected: ObjectKind::Toplevel,
+                actual: entry.kind,
+            }),
+        }
+    }
+
+    /// The title a toplevel has set, for a shell that displays it.
+    #[must_use]
+    pub fn toplevel_title(&self, connection: ConnectionId, toplevel: ObjectId) -> Option<&str> {
+        let entry = self
+            .connections
+            .get(&connection)?
+            .registry
+            .entry(toplevel)
+            .ok()?;
+        match &entry.value {
+            Object::Toplevel(state) => Some(state.title.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Ask a toplevel to adopt a size and a set of states.
+    ///
+    /// Advisory: a client may commit before receiving one and may keep drawing if none arrives,
+    /// which is what lets the compositor run with no shell attached. The serial is what a commit
+    /// echoes back, so a compositor that did send one can tell whether the content answers it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StateError::InvalidState`] when `state` sets a bit the bound interface version
+    /// does not define — §12.4 refuses an undefined value rather than ignoring it.
+    pub fn configure_toplevel(
+        &mut self,
+        connection: ConnectionId,
+        toplevel: ObjectId,
+        size: Size,
+        state: u32,
+    ) -> Result<u32, StateError> {
+        if state & !toplevel_state::VALID_V1 != 0 {
+            return Err(StateError::InvalidState {
+                object_id: toplevel,
+            });
+        }
+        let serial = self.next_configure;
+        self.next_configure = self.next_configure.wrapping_add(1);
+        self.toplevel_mut(connection, toplevel)?.last_configure = serial;
+        self.push_event(
+            connection,
+            toplevel,
+            EventKind::Configure {
+                serial,
+                size,
+                state,
+            },
+        );
+        Ok(serial)
+    }
+
+    /// Ask a toplevel to close. The window goes away when its client destroys it.
+    pub fn close_toplevel(
+        &mut self,
+        connection: ConnectionId,
+        toplevel: ObjectId,
+    ) -> Result<(), StateError> {
+        self.expect_kind(connection, toplevel, ObjectKind::Toplevel)?;
+        self.push_event(connection, toplevel, EventKind::Close);
+        Ok(())
+    }
+
     /// Where a buffer's pixels are, for a caller about to read them.
     #[must_use]
     pub fn buffer_source(
@@ -1616,6 +1767,8 @@ impl CompositorState {
             // A pool is one handed-over resource, so it is bounded by the same allowance as the
             // handles a connection may have imported.
             ObjectKind::ShmPool => self.limits.max_imported_handles,
+            // One role per surface, so a connection cannot hold more windows than surfaces.
+            ObjectKind::Toplevel => self.limits.max_surfaces,
             _ => self.limits.max_objects,
         };
         if count >= maximum {

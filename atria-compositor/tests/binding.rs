@@ -146,6 +146,11 @@ fn operations_the_wire_defines_and_the_state_machine_does_not_model_are_reported
         Operation::SurfaceCommit,
         Operation::SurfaceDestroy,
         Operation::BufferDestroy,
+        Operation::ShellGetToplevel,
+        Operation::ToplevelDestroy,
+        Operation::ToplevelSetTitle,
+        Operation::ToplevelSetMinSize,
+        Operation::ToplevelSetMaxSize,
     ];
 
     let mut checked = 0;

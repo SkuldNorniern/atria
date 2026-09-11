@@ -31,6 +31,11 @@ pub enum ResolveError {
     InsufficientRights { slot: u8 },
     /// The resource is too small for what the message says it holds.
     TooSmall { slot: u8, needed: u64, actual: u64 },
+    /// A title longer than the protocol permits.
+    ///
+    /// Refused rather than truncated: a truncated title is a wrong title, and a client that sent
+    /// one has a bug it should be told about.
+    TitleTooLong { bytes: usize, maximum: usize },
 }
 
 /// Shared memory a client handed over, validated and not yet mapped.

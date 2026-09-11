@@ -1,8 +1,11 @@
 use alloc::vec::Vec;
 
+use alloc::string::String;
 use atria_protocol::ObjectId;
 use atria_protocol::capability::Capability;
+
 use atria_protocol::interface::Interface;
+use atria_protocol::message::MAX_TITLE_BYTES;
 use atria_protocol::opcode::Opcode;
 
 use crate::resolve::SharedMemory;
@@ -29,6 +32,10 @@ pub enum ObjectKind {
     Compositor,
     /// The shared-memory factory a client binds from the registry.
     Shm,
+    /// The window role factory a client binds from the registry.
+    Shell,
+    /// A surface given window semantics.
+    Toplevel,
     ShmPool,
     Seat,
     Session,
@@ -85,6 +92,27 @@ pub enum Damage {
 /// An opaque value preserves single-assignment semantics without inventing policy roles.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SurfaceRole(pub u32);
+
+/// A window title, bounded at the length the protocol permits.
+///
+/// A newtype rather than a `String` so the bound is enforced where the value is made, not wherever
+/// a caller remembers to check. A title is text the compositor retains for as long as the window
+/// exists, which makes it a resource a client can grow.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct TitleText(String);
+
+impl TitleText {
+    /// Take a title, refusing one longer than the protocol permits.
+    #[must_use]
+    pub fn new(text: &str) -> Option<Self> {
+        (text.len() <= MAX_TITLE_BYTES).then(|| Self(String::from(text)))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 /// Shared-memory pixel formats the draft names, and the only values `create_buffer` accepts.
 ///
@@ -243,6 +271,23 @@ pub enum ClientRequest {
         new_id: ObjectId,
         descriptor: BufferDescriptor,
     },
+    /// Give a surface window semantics. A surface may take one role.
+    GetToplevel {
+        surface: ObjectId,
+        new_id: ObjectId,
+    },
+    SetTitle {
+        toplevel: ObjectId,
+        title: TitleText,
+    },
+    SetMinSize {
+        toplevel: ObjectId,
+        size: Size,
+    },
+    SetMaxSize {
+        toplevel: ObjectId,
+        size: Size,
+    },
     Attach {
         surface: ObjectId,
         buffer: ObjectId,
@@ -284,6 +329,14 @@ pub enum EventKind {
     ObjectDestroyed(ObjectKind),
     /// The identifier is retired and the client may allocate it again.
     IdRetired,
+    /// The compositor asks a toplevel to adopt a size and a set of states.
+    Configure {
+        serial: u32,
+        size: Size,
+        state: u32,
+    },
+    /// The compositor asks a toplevel to go away. A request, not an instruction.
+    Close,
     /// A global exists, and what interface and version it offers.
     Global {
         name: u32,

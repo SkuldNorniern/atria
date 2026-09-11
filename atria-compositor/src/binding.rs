@@ -10,12 +10,15 @@
 
 use atria_protocol::interface::{Interface, MessageKind, Operation, decode_operation};
 use atria_protocol::message::{
-    Attach, Bind, Commit, CreateBuffer, CreatePool, DamageBuffer, GetRegistry, NewId,
+    Attach, Bind, Commit, CreateBuffer, CreatePool, DamageBuffer, GetRegistry, GetToplevel, NewId,
+    SetTitle, SizeHint,
 };
 use atria_protocol::wire::{Frame, HandleIndex};
 use atria_protocol::{DecodeError, ObjectId, Opcode};
 
-use crate::model::{ClientRequest, ObjectKind, Point, Rect, Size};
+use atria_protocol::message::MAX_TITLE_BYTES;
+
+use crate::model::{ClientRequest, ObjectKind, Point, Rect, Size, TitleText};
 use crate::resolve::{HandleResolver, ResolveError, SharedMemory};
 
 /// Which interface an object of this kind answers, when the draw path defines one.
@@ -33,6 +36,8 @@ pub const fn interface_of(kind: ObjectKind) -> Option<Interface> {
         ObjectKind::Buffer => Some(Interface::Buffer),
         ObjectKind::Compositor => Some(Interface::Compositor),
         ObjectKind::Shm => Some(Interface::Shm),
+        ObjectKind::Shell => Some(Interface::Shell),
+        ObjectKind::Toplevel => Some(Interface::Toplevel),
         ObjectKind::ShmPool => Some(Interface::ShmPool),
         ObjectKind::Seat | ObjectKind::Session | ObjectKind::Fence | ObjectKind::InputStream => {
             None
@@ -69,7 +74,7 @@ impl From<DecodeError> for BindError {
 /// consulted a transport, so nothing here can fail for a reason the client is not responsible
 /// for.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DecodedRequest {
+pub enum DecodedRequest<'a> {
     CreateRegistry {
         new_id: ObjectId,
     },
@@ -95,6 +100,24 @@ pub enum DecodedRequest {
         version: u32,
         new_id: ObjectId,
     },
+    GetToplevel {
+        surface: ObjectId,
+        new_id: ObjectId,
+    },
+    /// Borrowed from the frame, so decoding allocates nothing. Resolution is what copies it into
+    /// the bounded title the compositor keeps.
+    SetTitle {
+        toplevel: ObjectId,
+        title: &'a str,
+    },
+    SetMinSize {
+        toplevel: ObjectId,
+        size: Size,
+    },
+    SetMaxSize {
+        toplevel: ObjectId,
+        size: Size,
+    },
     Attach {
         surface: ObjectId,
         buffer: ObjectId,
@@ -116,7 +139,7 @@ pub enum DecodedRequest {
 ///
 /// The caller supplies the kind because object identity is connection state, which this function
 /// deliberately does not hold.
-pub fn decode(kind: ObjectKind, frame: &Frame<'_>) -> Result<DecodedRequest, BindError> {
+pub fn decode<'a>(kind: ObjectKind, frame: &Frame<'a>) -> Result<DecodedRequest<'a>, BindError> {
     let object = frame.header.object_id;
     let opcode = frame.header.opcode;
     let Some(interface) = interface_of(kind) else {
@@ -161,6 +184,40 @@ pub fn decode(kind: ObjectKind, frame: &Frame<'_>) -> Result<DecodedRequest, Bin
                 name: payload.name,
                 version: payload.version,
                 new_id: payload.new_id,
+            })
+        }
+        Operation::ShellGetToplevel => {
+            let payload = GetToplevel::decode(frame.payload)?;
+            Ok(DecodedRequest::GetToplevel {
+                surface: payload.surface,
+                new_id: payload.new_id,
+            })
+        }
+        Operation::ToplevelSetTitle => {
+            let payload = SetTitle::decode(frame.payload)?;
+            Ok(DecodedRequest::SetTitle {
+                toplevel: object,
+                title: payload.title,
+            })
+        }
+        Operation::ToplevelSetMinSize => {
+            let payload = SizeHint::decode(frame.payload)?;
+            Ok(DecodedRequest::SetMinSize {
+                toplevel: object,
+                size: Size {
+                    width: payload.width,
+                    height: payload.height,
+                },
+            })
+        }
+        Operation::ToplevelSetMaxSize => {
+            let payload = SizeHint::decode(frame.payload)?;
+            Ok(DecodedRequest::SetMaxSize {
+                toplevel: object,
+                size: Size {
+                    width: payload.width,
+                    height: payload.height,
+                },
             })
         }
         Operation::CompositorCreateSurface => {
@@ -216,7 +273,7 @@ pub fn decode(kind: ObjectKind, frame: &Frame<'_>) -> Result<DecodedRequest, Bin
 /// Returns [`ResolveError`] when a slot is empty, holds the wrong kind of resource, or is too
 /// small for what the message says it holds. A request with no handles cannot fail here.
 pub fn resolve(
-    request: DecodedRequest,
+    request: DecodedRequest<'_>,
     handles: &mut impl HandleResolver,
 ) -> Result<ClientRequest, ResolveError> {
     match request {
@@ -246,6 +303,24 @@ pub fn resolve(
             version,
             new_id,
         }),
+        DecodedRequest::GetToplevel { surface, new_id } => {
+            Ok(ClientRequest::GetToplevel { surface, new_id })
+        }
+        DecodedRequest::SetTitle { toplevel, title } => {
+            // The bound is enforced where the value is made. A longer title is refused here
+            // rather than truncated, because a truncated title is a wrong title.
+            let title = TitleText::new(title).ok_or(ResolveError::TitleTooLong {
+                bytes: title.len(),
+                maximum: MAX_TITLE_BYTES,
+            })?;
+            Ok(ClientRequest::SetTitle { toplevel, title })
+        }
+        DecodedRequest::SetMinSize { toplevel, size } => {
+            Ok(ClientRequest::SetMinSize { toplevel, size })
+        }
+        DecodedRequest::SetMaxSize { toplevel, size } => {
+            Ok(ClientRequest::SetMaxSize { toplevel, size })
+        }
         DecodedRequest::Attach {
             surface,
             buffer,

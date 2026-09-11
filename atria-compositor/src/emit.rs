@@ -8,7 +8,8 @@
 use atria_protocol::error::ErrorCode as WireErrorCode;
 use atria_protocol::interface::Operation;
 use atria_protocol::message::{
-    DisplayError, EncodePayload, FrameDone, GlobalName, NewId, RegistryGlobal, encode_message,
+    Configure, DisplayError, EncodePayload, FrameDone, GlobalName, NewId, RegistryGlobal,
+    encode_message,
 };
 use atria_protocol::wire::Encoder;
 use atria_protocol::{EncodeError, ObjectId, Opcode};
@@ -95,6 +96,26 @@ pub fn encode_event(event: &Event, sequence: u32, out: &mut [u8]) -> Result<usiz
                 out,
             )
         }
+        EventKind::Configure {
+            serial,
+            size,
+            state,
+        } => {
+            let payload = Configure {
+                serial: *serial,
+                width: size.width,
+                height: size.height,
+                state: *state,
+            };
+            emit(
+                object,
+                Operation::ToplevelConfigure,
+                sequence,
+                &payload,
+                out,
+            )
+        }
+        EventKind::Close => emit_empty(object, Operation::ToplevelClose, sequence, out),
         EventKind::BufferRelease => emit_empty(object, Operation::BufferRelease, sequence, out),
         EventKind::FrameDone { timestamp_ns } => {
             let payload = FrameDone {
