@@ -8,6 +8,7 @@ use atria_protocol::interface::Interface;
 use atria_protocol::message::MAX_TITLE_BYTES;
 use atria_protocol::opcode::Opcode;
 
+use crate::output::IdentitySource;
 use crate::resolve::SharedMemory;
 
 use crate::error::StateError;
@@ -43,6 +44,9 @@ pub enum ObjectKind {
     Buffer,
     Fence,
     InputStream,
+    /// A display, bound from the registry. One global per display, because a client learns which
+    /// displays exist the same way it learns everything else exists.
+    Output,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -365,6 +369,31 @@ pub enum EventKind {
     FrameLate,
     KeyboardLeave,
     KeyboardEnter,
+    /// Which display a bound output object names.
+    OutputIdentity {
+        identity: u128,
+    },
+    /// Where the display sits, how big it physically is, and how its identity was derived.
+    OutputGeometry {
+        position: Point,
+        physical_millimetres: Size,
+        identity_source: IdentitySource,
+    },
+    /// The resolution and refresh the display is running.
+    OutputMode {
+        size: Size,
+        refresh_millihertz: u32,
+    },
+    /// The display's scale as an exact ratio.
+    OutputScale {
+        numerator: u32,
+        denominator: u32,
+    },
+    /// Everything above describes one consistent state of the display.
+    ///
+    /// The properties arrive as separate events, so a client that acted on each as it came would
+    /// act on a display half-described. This is the boundary that says the description is whole.
+    OutputDone,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

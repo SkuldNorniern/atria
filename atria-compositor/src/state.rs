@@ -22,6 +22,7 @@ use atria_protocol::interface::Interface;
 use crate::binding::interface_of;
 use alloc::string::String;
 
+use crate::output::{IdentitySource, OutputIdentity, OutputInfo, OutputSet, TopologyDelta};
 use crate::registry::{ObjectRegistry, Teardown};
 use crate::resolve::SharedMemory;
 use crate::shell::{ShellError, ToplevelHandle, ToplevelRecord};
@@ -249,6 +250,12 @@ struct Global {
     interface: Interface,
     kind: ObjectKind,
     version: u32,
+    /// Which display this global offers, when it offers one.
+    ///
+    /// A display is one global each rather than one global listing displays, so a display
+    /// arriving or leaving is a global arriving or leaving — the mechanism clients already have
+    /// for learning what exists.
+    output: Option<OutputIdentity>,
 }
 
 /// The protocol state machine between decoded messages and a display/input backend.
@@ -259,6 +266,7 @@ pub struct CompositorState {
     /// reused after it is withdrawn — a client may still have one in flight.
     globals: BTreeMap<u32, Global>,
     next_global: u32,
+    outputs: OutputSet,
     next_configure: u32,
     /// Windows by the handle a shell names them with. Compositor-wide, so it outlives any one
     /// connection — including a shell's.
@@ -288,6 +296,7 @@ impl CompositorState {
                 .with(Capability::BufferImport),
             globals: BTreeMap::new(),
             next_global: 1,
+            outputs: OutputSet::new(),
             next_configure: 1,
             toplevels: BTreeMap::new(),
             next_handle: 1,
@@ -1231,9 +1240,169 @@ impl CompositorState {
                 interface,
                 kind,
                 version,
+                output: None,
             },
         );
         Some(name)
+    }
+
+    /// The displays this compositor is composing for.
+    #[must_use]
+    pub const fn outputs(&self) -> &OutputSet {
+        &self.outputs
+    }
+
+    /// Apply one whole topology change, and make the globals match it.
+    ///
+    /// A display that arrived or returned gains a global; one that departed loses its own. Every
+    /// connected client is told, because a client that bound a display which has gone is holding
+    /// an object describing something that is no longer there.
+    ///
+    /// Returns what the change did, for a shell that has to rearrange around it.
+    pub fn apply_topology(
+        &mut self,
+        present: &[(OutputIdentity, IdentitySource, OutputInfo)],
+        version: u32,
+    ) -> TopologyDelta {
+        let delta = self.outputs.apply(present);
+
+        for identity in delta.arrived.iter().chain(&delta.returned) {
+            if self.global_for_output(*identity).is_some() {
+                continue;
+            }
+            let Some(name) = self.advertise_global(ObjectKind::Output, version) else {
+                continue;
+            };
+            if let Some(global) = self.globals.get_mut(&name) {
+                global.output = Some(*identity);
+            }
+            self.announce_global(name);
+        }
+
+        for identity in &delta.departed {
+            if let Some(name) = self.global_for_output(*identity) {
+                self.withdraw_global(name);
+            }
+        }
+
+        delta
+    }
+
+    /// Place a display in the scene, and tell anyone who bound it where it now is.
+    pub fn place_output(&mut self, identity: OutputIdentity, position: Point) -> bool {
+        if !self.outputs.place(identity, position) {
+            return false;
+        }
+        let Some(name) = self.global_for_output(identity) else {
+            return true;
+        };
+        self.redescribe_output(name);
+        true
+    }
+
+    /// Describe a display again to every connection that bound it.
+    fn redescribe_output(&mut self, name: u32) {
+        let bound: Vec<_> = self
+            .connections
+            .iter()
+            .flat_map(|(connection, client)| {
+                client
+                    .registry
+                    .ids()
+                    .filter(|id| client.registry.kind_of(*id) == Some(ObjectKind::Output))
+                    .map(move |id| (*connection, id))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        for (connection, object) in bound {
+            self.describe_output(connection, object, name);
+        }
+    }
+
+    /// The global offering a display, if one is advertised.
+    fn global_for_output(&self, identity: OutputIdentity) -> Option<u32> {
+        self.globals
+            .iter()
+            .find(|(_, global)| global.output == Some(identity))
+            .map(|(name, _)| *name)
+    }
+
+    /// Tell a connection everything about the display an object it just bound names.
+    ///
+    /// Five events and then `done`. A display's properties are separate events because they
+    /// change independently, and `done` is what says the description is whole — a client that
+    /// acted on each as it arrived would act on a display half-described.
+    fn describe_output(&mut self, connection: ConnectionId, object: ObjectId, name: u32) {
+        let Some(identity) = self.globals.get(&name).and_then(|global| global.output) else {
+            return;
+        };
+        let Some(info) = self.outputs.info(identity) else {
+            return;
+        };
+        let source = self
+            .outputs
+            .source(identity)
+            .unwrap_or(IdentitySource::Position);
+        let position = self
+            .outputs
+            .area(identity)
+            .map_or(Point::default(), |area| Point {
+                x: area.x,
+                y: area.y,
+            });
+
+        self.push_event(
+            connection,
+            object,
+            EventKind::OutputIdentity {
+                identity: identity.0,
+            },
+        );
+        self.push_event(
+            connection,
+            object,
+            EventKind::OutputGeometry {
+                position,
+                physical_millimetres: info.physical_millimetres,
+                identity_source: source,
+            },
+        );
+        self.push_event(
+            connection,
+            object,
+            EventKind::OutputMode {
+                size: info.size,
+                refresh_millihertz: info.refresh_millihertz,
+            },
+        );
+        self.push_event(
+            connection,
+            object,
+            EventKind::OutputScale {
+                numerator: info.scale_numerator,
+                denominator: info.scale_denominator,
+            },
+        );
+        self.push_event(connection, object, EventKind::OutputDone);
+    }
+
+    /// Tell every connection one global exists. Used when one appears after clients have bound.
+    fn announce_global(&mut self, name: u32) {
+        let Some(global) = self.globals.get(&name).copied() else {
+            return;
+        };
+        let connections: Vec<_> = self.connections.keys().copied().collect();
+        for connection in connections {
+            self.push_event(
+                connection,
+                ObjectId::DISPLAY,
+                EventKind::Global {
+                    name,
+                    interface: global.interface,
+                    version: global.version,
+                },
+            );
+        }
     }
 
     /// Withdraw a global. Objects already bound from it become inert rather than invalid.
@@ -1290,7 +1459,13 @@ impl CompositorState {
         if version == 0 || version > global.version {
             return Err(StateError::InvalidState { object_id: new_id });
         }
-        self.allocate_client(connection, new_id, global.kind, Object::Global)
+        self.allocate_client(connection, new_id, global.kind, Object::Global)?;
+        // A bound display describes itself immediately. A client that had to ask would have a
+        // window on an output whose size it does not yet know.
+        if global.kind == ObjectKind::Output {
+            self.describe_output(connection, new_id, name);
+        }
+        Ok(())
     }
 
     /// The memory a pool covers, as resolution validated it.

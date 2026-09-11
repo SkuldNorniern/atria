@@ -7,6 +7,7 @@
 
 use atria_protocol::error::ErrorCode as WireErrorCode;
 use atria_protocol::interface::Operation;
+use atria_protocol::message;
 use atria_protocol::message::{
     Configure, DisplayError, EncodePayload, FrameDone, GlobalName, NewId, RegistryGlobal,
     encode_message,
@@ -16,6 +17,7 @@ use atria_protocol::{EncodeError, ObjectId, Opcode};
 
 use crate::error::StateError;
 use crate::model::{Event, EventKind};
+use crate::output::IdentitySource;
 
 /// Why an event could not be put on the wire.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -96,6 +98,54 @@ pub fn encode_event(event: &Event, sequence: u32, out: &mut [u8]) -> Result<usiz
                 out,
             )
         }
+        EventKind::OutputIdentity { identity } => {
+            let payload = message::OutputIdentity {
+                high: (*identity >> 64) as u64,
+                low: *identity as u64,
+            };
+            emit(object, Operation::OutputIdentity, sequence, &payload, out)
+        }
+        EventKind::OutputGeometry {
+            position,
+            physical_millimetres,
+            identity_source,
+        } => {
+            let payload = message::OutputGeometry {
+                x: position.x,
+                y: position.y,
+                physical_width_millimetres: physical_millimetres.width,
+                physical_height_millimetres: physical_millimetres.height,
+                // The wire carries which kind of identity this is, because a shell that remembers
+                // an arrangement must know whether moving a cable moves the identity with it.
+                identity_source: match identity_source {
+                    IdentitySource::Panel => 0,
+                    IdentitySource::Position => 1,
+                },
+            };
+            emit(object, Operation::OutputGeometry, sequence, &payload, out)
+        }
+        EventKind::OutputMode {
+            size,
+            refresh_millihertz,
+        } => {
+            let payload = message::OutputMode {
+                width: size.width,
+                height: size.height,
+                refresh_millihertz: *refresh_millihertz,
+            };
+            emit(object, Operation::OutputMode, sequence, &payload, out)
+        }
+        EventKind::OutputScale {
+            numerator,
+            denominator,
+        } => {
+            let payload = message::OutputScale {
+                numerator: *numerator,
+                denominator: *denominator,
+            };
+            emit(object, Operation::OutputScale, sequence, &payload, out)
+        }
+        EventKind::OutputDone => emit_empty(object, Operation::OutputDone, sequence, out),
         EventKind::Configure {
             serial,
             size,

@@ -39,6 +39,7 @@ pub const fn interface_of(kind: ObjectKind) -> Option<Interface> {
         ObjectKind::Shell => Some(Interface::Shell),
         ObjectKind::Toplevel => Some(Interface::Toplevel),
         ObjectKind::ShmPool => Some(Interface::ShmPool),
+        ObjectKind::Output => Some(Interface::Output),
         ObjectKind::Seat | ObjectKind::Session | ObjectKind::Fence | ObjectKind::InputStream => {
             None
         }
