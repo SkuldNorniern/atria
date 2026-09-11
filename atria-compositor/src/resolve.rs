@@ -36,6 +36,8 @@ pub enum ResolveError {
     /// Refused rather than truncated: a truncated title is a wrong title, and a client that sent
     /// one has a bug it should be told about.
     TitleTooLong { bytes: usize, maximum: usize },
+    /// Text longer than the protocol carries. An input method cannot commit a document.
+    TextTooLong { bytes: usize, maximum: usize },
 }
 
 /// Shared memory a client handed over, validated and not yet mapped.

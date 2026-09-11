@@ -6,7 +6,7 @@ use atria_protocol::capability::Capability;
 
 use atria_protocol::interface::Interface;
 use atria_protocol::key::{Modifiers, PhysicalKey};
-use atria_protocol::message::MAX_TITLE_BYTES;
+use atria_protocol::message::{MAX_TEXT_BYTES, MAX_TITLE_BYTES, TextPurpose};
 use atria_protocol::opcode::Opcode;
 
 use crate::output::IdentitySource;
@@ -116,6 +116,10 @@ pub enum ObjectKind {
     Keyboard,
     /// A holder's claim on key chords.
     Shortcuts,
+    /// Text, as an application receives it.
+    TextInput,
+    /// The program that turns keys into text.
+    InputMethod,
     /// A display, bound from the registry. One global per display, because a client learns which
     /// displays exist the same way it learns everything else exists.
     Output,
@@ -182,6 +186,23 @@ impl TitleText {
     #[must_use]
     pub fn new(text: &str) -> Option<Self> {
         (text.len() <= MAX_TITLE_BYTES).then(|| Self(String::from(text)))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Text crossing between a field and an input method, bounded on the way in.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct TextBuffer(String);
+
+impl TextBuffer {
+    /// Take text, refusing more than the protocol carries.
+    #[must_use]
+    pub fn new(text: &str) -> Option<Self> {
+        (text.len() <= MAX_TEXT_BYTES).then(|| Self(String::from(text)))
     }
 
     #[must_use]
@@ -401,6 +422,35 @@ pub enum ClientRequest {
         manager: ObjectId,
         shortcut: u32,
     },
+    /// This field wants text, and says what it is for.
+    EnableText {
+        text_input: ObjectId,
+        purpose: TextPurpose,
+    },
+    DisableText {
+        text_input: ObjectId,
+    },
+    SetCursorArea {
+        text_input: ObjectId,
+        area: Rect,
+    },
+    /// What the input method has composed so far. Replaced wholesale by the next one.
+    SetPreedit {
+        method: ObjectId,
+        text: TextBuffer,
+        cursor_begin: i32,
+        cursor_end: i32,
+    },
+    /// What the input method decided the keys became.
+    CommitText {
+        method: ObjectId,
+        text: TextBuffer,
+    },
+    /// The input method has finished one round of changes.
+    TextDone {
+        method: ObjectId,
+        serial: u32,
+    },
     /// Give a surface window semantics. A surface may take one role.
     GetToplevel {
         surface: ObjectId,
@@ -522,6 +572,30 @@ pub enum EventKind {
         modifiers: Modifiers,
         epoch: u32,
     },
+    /// This field now has the seat's text.
+    TextEnter {
+        surface: ObjectId,
+    },
+    TextLeave {
+        surface: ObjectId,
+    },
+    TextPreedit {
+        text: TextBuffer,
+        cursor_begin: i32,
+        cursor_end: i32,
+    },
+    TextCommit {
+        text: TextBuffer,
+    },
+    TextDone {
+        serial: u32,
+    },
+    /// The input method is now composing into this field.
+    MethodActivated {
+        surface: ObjectId,
+        purpose: TextPurpose,
+    },
+    MethodDeactivated,
     /// A claimed chord fired.
     ShortcutTriggered {
         shortcut: u32,

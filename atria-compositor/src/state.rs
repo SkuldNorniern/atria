@@ -19,6 +19,7 @@ use crate::model::{
 };
 use atria_protocol::interface::Interface;
 use atria_protocol::key::{Modifiers, PhysicalKey};
+use atria_protocol::message::TextPurpose;
 
 use crate::binding::interface_of;
 use alloc::string::String;
@@ -252,6 +253,9 @@ const MAX_HELD_KEYS: usize = 32;
 /// Chords that may be claimed at once, across every holder and seat.
 const MAX_SHORTCUTS: usize = 256;
 
+/// Fields that may want text at once.
+const MAX_TEXT_FIELDS: usize = 256;
+
 /// One seat's routing: where its devices point, and which world that belongs to.
 ///
 /// The epoch and serial belong to the seat, not to a device. A break in continuity breaks it for
@@ -263,6 +267,14 @@ struct SeatRouting {
     serial: u32,
     pointer: PointerRouting,
     keyboard: KeyboardRouting,
+}
+
+/// A field that wants text, and what it is for.
+#[derive(Clone, Copy, Debug)]
+struct TextField {
+    connection: ConnectionId,
+    object: ObjectId,
+    purpose: TextPurpose,
 }
 
 /// Where a seat's keys are.
@@ -325,6 +337,12 @@ pub struct CompositorState {
     seat: SeatRouting,
     /// Claimed chords, one holder each. Bounded by `MAX_SHORTCUTS`.
     shortcuts: BTreeMap<(SeatId, Chord), ShortcutClaim>,
+    /// Fields wanting text, by the object that asked. One per text-input object.
+    fields: BTreeMap<(ConnectionId, ObjectId), TextField>,
+    /// The input method, if one is bound. One per compositor: a seat has one way of composing.
+    method: Option<(ConnectionId, ObjectId)>,
+    /// The field the method is composing into, while it is.
+    composing: Option<TextField>,
     next_configure: u32,
     /// Windows by the handle a shell names them with. Compositor-wide, so it outlives any one
     /// connection — including a shell's.
@@ -357,6 +375,9 @@ impl CompositorState {
             outputs: OutputSet::new(),
             seat: SeatRouting::default(),
             shortcuts: BTreeMap::new(),
+            fields: BTreeMap::new(),
+            method: None,
+            composing: None,
             next_configure: 1,
             toplevels: BTreeMap::new(),
             next_handle: 1,
@@ -588,6 +609,62 @@ impl CompositorState {
             ClientRequest::GetPointer { seat, new_id } => {
                 self.expect_kind(connection, seat, ObjectKind::Seat)?;
                 self.allocate_client(connection, new_id, ObjectKind::Pointer, Object::Global)
+            }
+            ClientRequest::EnableText {
+                text_input,
+                purpose,
+            } => {
+                self.expect_kind(connection, text_input, ObjectKind::TextInput)?;
+                if self.fields.len() >= MAX_TEXT_FIELDS {
+                    return Err(StateError::QuotaExceeded {
+                        object_id: text_input,
+                    });
+                }
+                self.fields.insert(
+                    (connection, text_input),
+                    TextField {
+                        connection,
+                        object: text_input,
+                        purpose,
+                    },
+                );
+                self.refresh_composition();
+                Ok(())
+            }
+            ClientRequest::DisableText { text_input } => {
+                self.expect_kind(connection, text_input, ObjectKind::TextInput)?;
+                self.fields.remove(&(connection, text_input));
+                self.refresh_composition();
+                Ok(())
+            }
+            ClientRequest::SetCursorArea { text_input, area } => {
+                self.expect_kind(connection, text_input, ObjectKind::TextInput)?;
+                let _ = area;
+                Ok(())
+            }
+            ClientRequest::SetPreedit {
+                method,
+                text,
+                cursor_begin,
+                cursor_end,
+            } => {
+                self.expect_kind(connection, method, ObjectKind::InputMethod)?;
+                self.tell_field(EventKind::TextPreedit {
+                    text,
+                    cursor_begin,
+                    cursor_end,
+                });
+                Ok(())
+            }
+            ClientRequest::CommitText { method, text } => {
+                self.expect_kind(connection, method, ObjectKind::InputMethod)?;
+                self.tell_field(EventKind::TextCommit { text });
+                Ok(())
+            }
+            ClientRequest::TextDone { method, serial } => {
+                self.expect_kind(connection, method, ObjectKind::InputMethod)?;
+                self.tell_field(EventKind::TextDone { serial });
+                Ok(())
             }
             ClientRequest::RegisterShortcut {
                 manager,
@@ -1316,6 +1393,8 @@ impl CompositorState {
             );
         }
         self.keyboard_focus = new_focus;
+        // Text follows the keys. A field that is no longer focused stops being composed into.
+        self.refresh_composition();
         let handle = new_focus
             .and_then(|surface| self.handle_of_surface(surface))
             .unwrap_or(ToplevelHandle(0));
@@ -1729,6 +1808,24 @@ impl CompositorState {
                 capability: Capability::ShortcutControl,
             });
         }
+        if global.kind == ObjectKind::InputMethod {
+            if !self
+                .capabilities(connection)
+                .is_some_and(|held| held.contains(Capability::InputMethod))
+            {
+                return Err(StateError::UnsupportedCapability {
+                    object_id: new_id,
+                    capability: Capability::InputMethod,
+                });
+            }
+            // One method at a time. A second would see the same keys as the first, which is the
+            // reach this capability exists to keep rare.
+            if self.method.is_some() {
+                return Err(StateError::InvalidState { object_id: new_id });
+            }
+            self.method = Some((connection, new_id));
+            self.refresh_composition();
+        }
         self.allocate_client(connection, new_id, global.kind, Object::Global)?;
         // A bound display describes itself immediately. A client that had to ask would have a
         // window on an output whose size it does not yet know.
@@ -2058,6 +2155,29 @@ impl CompositorState {
             return;
         }
 
+        // While an input method is composing, the keys are its raw material. The field is sent
+        // what they became, not what they were: for Korean or Japanese there is no useful
+        // correspondence between the two.
+        if self.composing.is_some()
+            && let Some((connection, object)) = self.method
+        {
+            self.seat.serial = self.seat.serial.wrapping_add(1);
+            let serial = self.seat.serial;
+            let epoch = self.seat.epoch;
+            self.push_event(
+                connection,
+                object,
+                EventKind::Key {
+                    serial,
+                    time_ns,
+                    key,
+                    pressed,
+                    epoch,
+                },
+            );
+            return;
+        }
+
         let Some(target) = self.keyboard_focus else {
             return;
         };
@@ -2081,6 +2201,65 @@ impl CompositorState {
                 EventKind::KeyModifiers { modifiers, epoch },
             );
         }
+    }
+
+    /// Whatever the method should be composing into now, told to both sides.
+    ///
+    /// The field the method composes into follows keyboard focus: text goes where the keys would
+    /// have gone. A password field is never composed into, because an input method sees every key
+    /// of whatever it is composing for, and that is not a thing to point at a password.
+    fn refresh_composition(&mut self) {
+        let wanted = self.keyboard_focus.and_then(|surface| {
+            self.fields
+                .values()
+                .find(|field| field.connection == surface.connection)
+                .copied()
+                .filter(|field| field.purpose.admits_composition())
+        });
+
+        let same = match (self.composing, wanted) {
+            (Some(was), Some(now)) => was.connection == now.connection && was.object == now.object,
+            (None, None) => true,
+            _ => false,
+        };
+        if same {
+            return;
+        }
+
+        if let Some(was) = self.composing.take() {
+            let surface = self
+                .keyboard_focus
+                .map_or(ObjectId::NULL, |key| key.object_id);
+            self.push_event(was.connection, was.object, EventKind::TextLeave { surface });
+            if let Some((connection, object)) = self.method {
+                self.push_event(connection, object, EventKind::MethodDeactivated);
+            }
+        }
+        if let Some(now) = wanted
+            && let Some((connection, object)) = self.method
+        {
+            let surface = self
+                .keyboard_focus
+                .map_or(ObjectId::NULL, |key| key.object_id);
+            self.composing = Some(now);
+            self.push_event(now.connection, now.object, EventKind::TextEnter { surface });
+            self.push_event(
+                connection,
+                object,
+                EventKind::MethodActivated {
+                    surface,
+                    purpose: now.purpose,
+                },
+            );
+        }
+    }
+
+    /// Send to the field the method is composing into, if there is one.
+    fn tell_field(&mut self, event: EventKind) {
+        let Some(field) = self.composing else {
+            return;
+        };
+        self.push_event(field.connection, field.object, event);
     }
 
     /// Claim a chord for a holder that may claim chords.
@@ -2323,6 +2502,17 @@ impl CompositorState {
         }
         // A holder going releases its chords, or nothing could ever claim them again.
         self.shortcuts.retain(|_, claim| claim.holder != connection);
+        self.fields.retain(|(owner, _), _| *owner != connection);
+        if self.method.is_some_and(|(owner, _)| owner == connection) {
+            self.method = None;
+        }
+        if self
+            .composing
+            .is_some_and(|field| field.connection == connection)
+        {
+            self.composing = None;
+        }
+        self.refresh_composition();
         for handle in retired {
             self.tell_shells(EventKind::ShellToplevelGone { handle });
         }

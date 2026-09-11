@@ -323,6 +323,52 @@ pub fn encode_event(event: &Event, sequence: u32, out: &mut [u8]) -> Result<usiz
                 out,
             )
         }
+        EventKind::TextEnter { surface } => {
+            let payload = NewId { new_id: *surface };
+            emit(object, Operation::TextInputEnter, sequence, &payload, out)
+        }
+        EventKind::TextLeave { surface } => {
+            let payload = NewId { new_id: *surface };
+            emit(object, Operation::TextInputLeave, sequence, &payload, out)
+        }
+        EventKind::TextPreedit {
+            text,
+            cursor_begin,
+            cursor_end,
+        } => {
+            let payload = message::Preedit {
+                text: text.as_str(),
+                cursor_begin: *cursor_begin,
+                cursor_end: *cursor_end,
+            };
+            emit(object, Operation::TextInputPreedit, sequence, &payload, out)
+        }
+        EventKind::TextCommit { text } => {
+            let payload = message::CommitText {
+                text: text.as_str(),
+            };
+            emit(object, Operation::TextInputCommit, sequence, &payload, out)
+        }
+        EventKind::TextDone { serial } => {
+            let payload = GlobalName { name: *serial };
+            emit(object, Operation::TextInputDone, sequence, &payload, out)
+        }
+        EventKind::MethodActivated { surface, purpose } => {
+            let payload = message::InputMethodActivation {
+                surface: *surface,
+                purpose: purpose.into_raw(),
+            };
+            emit(
+                object,
+                Operation::InputMethodActivate,
+                sequence,
+                &payload,
+                out,
+            )
+        }
+        EventKind::MethodDeactivated => {
+            emit_empty(object, Operation::InputMethodDeactivate, sequence, out)
+        }
         EventKind::ShortcutTriggered {
             shortcut,
             seat,

@@ -26,7 +26,7 @@ pub use model::{
     BufferDescriptor, BufferState, BufferTransport, Chord, ChordMatch, ClientRequest, CommitId,
     ConnectionId, Damage, Event, EventKind, FORMAT_ARGB8888, FORMAT_RGB565, FORMAT_XRGB8888,
     FocusEvent, InteractionKind, ObjectKind, Point, Rect, SeatCapabilities, SeatId, SeatSnapshot,
-    SessionSnapshot, Size, SurfaceKey, SurfaceRole, SurfaceSnapshot, TitleText,
+    SessionSnapshot, Size, SurfaceKey, SurfaceRole, SurfaceSnapshot, TextBuffer, TitleText,
     pixel_format_is_known,
 };
 pub use output::{

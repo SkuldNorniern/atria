@@ -10,17 +10,17 @@
 
 use atria_protocol::interface::{Interface, MessageKind, Operation, decode_operation};
 use atria_protocol::message::{
-    Attach, Bind, Commit, CreateBuffer, CreatePool, DamageBuffer, GetRegistry, GetToplevel,
-    GlobalName, NewId, SeatHandle, SetTitle, ShellConfigure, ShellHandle, ShellPlace, ShortcutName,
-    ShortcutRegistration, SizeHint,
+    Attach, Bind, Commit, CommitText, CreateBuffer, CreatePool, CursorArea, DamageBuffer,
+    GetRegistry, GetToplevel, GlobalName, NewId, Preedit, SeatHandle, SetTitle, ShellConfigure,
+    ShellHandle, ShellPlace, ShortcutName, ShortcutRegistration, SizeHint, TextPurpose,
 };
 use atria_protocol::wire::{Frame, HandleIndex};
 use atria_protocol::{DecodeError, ObjectId, Opcode};
 
-use atria_protocol::message::MAX_TITLE_BYTES;
+use atria_protocol::message::{MAX_TEXT_BYTES, MAX_TITLE_BYTES};
 
 use crate::model::{
-    Chord, ChordMatch, ClientRequest, ObjectKind, Point, Rect, SeatId, Size, TitleText,
+    Chord, ChordMatch, ClientRequest, ObjectKind, Point, Rect, SeatId, Size, TextBuffer, TitleText,
 };
 use crate::resolve::{HandleResolver, ResolveError, SharedMemory};
 use atria_protocol::key::PhysicalKey;
@@ -50,6 +50,8 @@ pub const fn interface_of(kind: ObjectKind) -> Option<Interface> {
         ObjectKind::Pointer => Some(Interface::Pointer),
         ObjectKind::Keyboard => Some(Interface::Keyboard),
         ObjectKind::Shortcuts => Some(Interface::Shortcuts),
+        ObjectKind::TextInput => Some(Interface::TextInput),
+        ObjectKind::InputMethod => Some(Interface::InputMethod),
         ObjectKind::Seat => Some(Interface::Seat),
         ObjectKind::Session | ObjectKind::Fence | ObjectKind::InputStream => None,
     }
@@ -137,6 +139,31 @@ pub enum DecodedRequest<'a> {
     UnregisterShortcut {
         manager: ObjectId,
         shortcut: u32,
+    },
+    EnableText {
+        text_input: ObjectId,
+        purpose: TextPurpose,
+    },
+    DisableText {
+        text_input: ObjectId,
+    },
+    SetCursorArea {
+        text_input: ObjectId,
+        area: Rect,
+    },
+    SetPreedit {
+        method: ObjectId,
+        text: &'a str,
+        cursor_begin: i32,
+        cursor_end: i32,
+    },
+    CommitText {
+        method: ObjectId,
+        text: &'a str,
+    },
+    TextDone {
+        method: ObjectId,
+        serial: u32,
     },
     /// A shell's request, carrying a compositor-wide handle rather than an object it could name.
     ShellConfigure {
@@ -288,6 +315,50 @@ pub fn decode<'a>(kind: ObjectKind, frame: &Frame<'a>) -> Result<DecodedRequest<
                     modifiers: payload.modifiers,
                     mode,
                 },
+            })
+        }
+        Operation::TextInputEnable => {
+            let payload = GlobalName::decode(frame.payload)?;
+            let purpose = TextPurpose::from_raw(payload.name).ok_or(DecodeError::SizeOverflow)?;
+            Ok(DecodedRequest::EnableText {
+                text_input: object,
+                purpose,
+            })
+        }
+        Operation::TextInputDisable => Ok(DecodedRequest::DisableText { text_input: object }),
+        Operation::TextInputSetCursorArea => {
+            let payload = CursorArea::decode(frame.payload)?;
+            Ok(DecodedRequest::SetCursorArea {
+                text_input: object,
+                area: Rect {
+                    x: payload.x,
+                    y: payload.y,
+                    width: payload.width,
+                    height: payload.height,
+                },
+            })
+        }
+        Operation::InputMethodSetPreedit => {
+            let payload = Preedit::decode(frame.payload)?;
+            Ok(DecodedRequest::SetPreedit {
+                method: object,
+                text: payload.text,
+                cursor_begin: payload.cursor_begin,
+                cursor_end: payload.cursor_end,
+            })
+        }
+        Operation::InputMethodCommit => {
+            let payload = CommitText::decode(frame.payload)?;
+            Ok(DecodedRequest::CommitText {
+                method: object,
+                text: payload.text,
+            })
+        }
+        Operation::InputMethodDone => {
+            let payload = GlobalName::decode(frame.payload)?;
+            Ok(DecodedRequest::TextDone {
+                method: object,
+                serial: payload.name,
             })
         }
         Operation::ShortcutsUnregister => {
@@ -491,6 +562,41 @@ pub fn resolve(
         }),
         DecodedRequest::UnregisterShortcut { manager, shortcut } => {
             Ok(ClientRequest::UnregisterShortcut { manager, shortcut })
+        }
+        DecodedRequest::EnableText {
+            text_input,
+            purpose,
+        } => Ok(ClientRequest::EnableText {
+            text_input,
+            purpose,
+        }),
+        DecodedRequest::DisableText { text_input } => Ok(ClientRequest::DisableText { text_input }),
+        DecodedRequest::SetCursorArea { text_input, area } => {
+            Ok(ClientRequest::SetCursorArea { text_input, area })
+        }
+        DecodedRequest::SetPreedit {
+            method,
+            text,
+            cursor_begin,
+            cursor_end,
+        } => Ok(ClientRequest::SetPreedit {
+            method,
+            text: TextBuffer::new(text).ok_or(ResolveError::TextTooLong {
+                bytes: text.len(),
+                maximum: MAX_TEXT_BYTES,
+            })?,
+            cursor_begin,
+            cursor_end,
+        }),
+        DecodedRequest::CommitText { method, text } => Ok(ClientRequest::CommitText {
+            method,
+            text: TextBuffer::new(text).ok_or(ResolveError::TextTooLong {
+                bytes: text.len(),
+                maximum: MAX_TEXT_BYTES,
+            })?,
+        }),
+        DecodedRequest::TextDone { method, serial } => {
+            Ok(ClientRequest::TextDone { method, serial })
         }
         DecodedRequest::ShellConfigure {
             control,
