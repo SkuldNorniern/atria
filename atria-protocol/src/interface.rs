@@ -355,3 +355,43 @@ pub const INTERFACES: &[Interface] = &[
     Interface::Toplevel,
     Interface::Output,
 ];
+
+/// The states a toplevel may be told it is in.
+///
+/// A closed set, and which bits exist is a property of the bound interface version rather than a
+/// band reserved forever — §12.4. A later version widens the mask, and a peer bound at an earlier
+/// one never receives the wider value because §12.5 gates the operation carrying it.
+pub mod toplevel_state {
+    pub const ACTIVATED: u32 = 1 << 0;
+    pub const MAXIMIZED: u32 = 1 << 1;
+    pub const FULLSCREEN: u32 = 1 << 2;
+    pub const RESIZING: u32 = 1 << 3;
+    pub const SUSPENDED: u32 = 1 << 4;
+    pub const TILED_LEFT: u32 = 1 << 5;
+    pub const TILED_RIGHT: u32 = 1 << 6;
+    pub const TILED_TOP: u32 = 1 << 7;
+    pub const TILED_BOTTOM: u32 = 1 << 8;
+
+    /// Bits `atria_toplevel` version 1 defines. A value with any other bit set is refused.
+    pub const VALID_V1: u32 = ACTIVATED
+        | MAXIMIZED
+        | FULLSCREEN
+        | RESIZING
+        | SUSPENDED
+        | TILED_LEFT
+        | TILED_RIGHT
+        | TILED_TOP
+        | TILED_BOTTOM;
+
+    /// Bits defined by a given interface version.
+    ///
+    /// A function rather than one constant, because the rule is "bits not defined by the bound
+    /// version must be zero" and a caller has to be able to ask for the version it bound.
+    #[must_use]
+    pub const fn valid_mask(version: u32) -> u32 {
+        match version {
+            0 => 0,
+            _ => VALID_V1,
+        }
+    }
+}

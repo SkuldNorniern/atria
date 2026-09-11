@@ -407,6 +407,134 @@ impl EncodePayload for Bind {
     }
 }
 
+/// Bytes a title may occupy.
+///
+/// A title is client-supplied text the compositor retains for as long as the window exists, so it
+/// is a resource a client can grow. Bounded here rather than by whatever the message ceiling
+/// allows, because a 64 KiB window title is not a title.
+pub const MAX_TITLE_BYTES: usize = 256;
+
+/// `atria_shell.get_toplevel` payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GetToplevel {
+    pub surface: ObjectId,
+    pub new_id: ObjectId,
+}
+
+impl GetToplevel {
+    pub fn decode(input: &[u8]) -> Result<Self, DecodeError> {
+        let mut decoder = Decoder::new(input);
+        let value = Self {
+            surface: ObjectId::from_raw(decoder.read_u32()?),
+            new_id: ObjectId::from_raw(decoder.read_u32()?),
+        };
+        decoder.finish()?;
+        Ok(value)
+    }
+}
+
+impl EncodePayload for GetToplevel {
+    fn encoded_len(&self) -> Result<usize, EncodeError> {
+        Ok(8)
+    }
+
+    fn encode(&self, encoder: &mut Encoder<'_>) -> Result<(), EncodeError> {
+        encoder.write_u32(self.surface.into_raw())?;
+        encoder.write_u32(self.new_id.into_raw())
+    }
+}
+
+/// `atria_toplevel.set_title` payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SetTitle<'a> {
+    pub title: &'a str,
+}
+
+impl<'a> SetTitle<'a> {
+    pub fn decode(input: &'a [u8]) -> Result<Self, DecodeError> {
+        let mut decoder = Decoder::new(input);
+        let title = decoder.read_string()?;
+        decoder.finish()?;
+        Ok(Self { title })
+    }
+}
+
+impl EncodePayload for SetTitle<'_> {
+    fn encoded_len(&self) -> Result<usize, EncodeError> {
+        Ok(4 + padded_size(self.title.len()).ok_or(EncodeError::SizeOverflow)?)
+    }
+
+    fn encode(&self, encoder: &mut Encoder<'_>) -> Result<(), EncodeError> {
+        encoder.write_string(self.title)
+    }
+}
+
+/// `atria_toplevel.set_min_size` and `set_max_size` payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SizeHint {
+    pub width: u32,
+    pub height: u32,
+}
+
+impl SizeHint {
+    pub fn decode(input: &[u8]) -> Result<Self, DecodeError> {
+        let mut decoder = Decoder::new(input);
+        let value = Self {
+            width: decoder.read_u32()?,
+            height: decoder.read_u32()?,
+        };
+        decoder.finish()?;
+        Ok(value)
+    }
+}
+
+impl EncodePayload for SizeHint {
+    fn encoded_len(&self) -> Result<usize, EncodeError> {
+        Ok(8)
+    }
+
+    fn encode(&self, encoder: &mut Encoder<'_>) -> Result<(), EncodeError> {
+        encoder.write_u32(self.width)?;
+        encoder.write_u32(self.height)
+    }
+}
+
+/// `atria_toplevel.configure` payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Configure {
+    pub serial: u32,
+    pub width: u32,
+    pub height: u32,
+    pub state: u32,
+}
+
+impl Configure {
+    pub fn decode(input: &[u8]) -> Result<Self, DecodeError> {
+        let mut decoder = Decoder::new(input);
+        let value = Self {
+            serial: decoder.read_u32()?,
+            width: decoder.read_u32()?,
+            height: decoder.read_u32()?,
+            state: decoder.read_u32()?,
+        };
+        decoder.finish()?;
+        Ok(value)
+    }
+}
+
+impl EncodePayload for Configure {
+    fn encoded_len(&self) -> Result<usize, EncodeError> {
+        Ok(16)
+    }
+
+    fn encode(&self, encoder: &mut Encoder<'_>) -> Result<(), EncodeError> {
+        encoder.write_u32(self.serial)?;
+        encoder.write_u32(self.width)?;
+        encoder.write_u32(self.height)?;
+        encoder.write_u32(self.state)
+    }
+}
+
 /// `atria_surface.frame_done` payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FrameDone {
