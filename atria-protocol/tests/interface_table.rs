@@ -93,7 +93,7 @@ fn every_fixed_message_is_word_aligned_and_within_the_ceiling() {
             let spec = operation.spec();
             let Some(size) = spec.message_size() else {
                 assert!(
-                    spec.payload.contains(&Field::String),
+                    spec.payload.contains(&Field::String) || spec.payload.contains(&Field::Array),
                     "{} has no size but no variable-length field",
                     spec.name
                 );
@@ -163,7 +163,6 @@ fn the_documented_sizes_are_the_computed_sizes() {
         (Operation::PointerMotion, 0x20),
         (Operation::PointerButton, 0x24),
         (Operation::PointerAxis, 0x20),
-        (Operation::KeyboardEnter, 0x1c),
         (Operation::KeyboardLeave, 0x18),
         (Operation::KeyboardKey, 0x24),
         (Operation::KeyboardModifiers, 0x20),
@@ -188,6 +187,7 @@ fn only_the_string_carrying_messages_are_variable_length() {
         Operation::RegistryGlobal,
         Operation::ToplevelSetTitle,
         Operation::ShellControlToplevel,
+        Operation::KeyboardEnter,
     ];
 
     for interface in INTERFACES {

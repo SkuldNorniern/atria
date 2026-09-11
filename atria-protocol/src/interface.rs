@@ -25,6 +25,8 @@ pub enum Field {
     U64,
     /// Length-prefixed UTF-8, padded to four bytes. Makes a message variable-length.
     String,
+    /// A length-prefixed run of 32-bit values. Makes a message variable-length.
+    Array,
 }
 
 impl Field {
@@ -34,7 +36,7 @@ impl Field {
         match self {
             Self::Object | Self::Handle(_) | Self::U32 | Self::I32 => Some(4),
             Self::U64 => Some(8),
-            Self::String => None,
+            Self::String | Self::Array => None,
         }
     }
 }
@@ -196,7 +198,7 @@ impl Operation {
     /// The table row for this operation. Exhaustive, so an operation cannot exist without one.
     #[must_use]
     pub const fn spec(self) -> OperationSpec {
-        use Field::{I32, Object, String, U32, U64};
+        use Field::{Array, I32, Object, String, U32, U64};
         use Interface as I;
         use MessageKind::{Event, Method};
 
@@ -330,7 +332,15 @@ impl Operation {
             Self::KeyboardDestroy => spec(I::Keyboard, Method, 0, "destroy", &[]),
             // Focus carries what is already held down. A client given focus mid-chord and told
             // only about later releases would believe keys were up that are not.
-            Self::KeyboardEnter => spec(I::Keyboard, Event, 0, "enter", &[U32, Object, U32, U32]),
+            // Carries the keys already held: a client given focus mid-chord and told only about
+            // later releases would believe keys were up that are not.
+            Self::KeyboardEnter => spec(
+                I::Keyboard,
+                Event,
+                0,
+                "enter",
+                &[U32, Object, U32, U32, Array],
+            ),
             Self::KeyboardLeave => spec(I::Keyboard, Event, 1, "leave", &[U32, Object, U32]),
             // The key is a physical position, not a character. What a position means depends on a
             // layout the compositor does not own, and text arrives by its own route.

@@ -1359,42 +1359,71 @@ impl EncodePayload for SeatName {
     }
 }
 
-/// A surface gained keyboard focus, with what is already held down.
+/// A surface gained keyboard focus, with every key already held.
+///
+/// The held set travels with the focus. A client told only about later releases would believe
+/// keys were up that are not, and act on a chord it never saw begin.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct KeyboardEnter {
+pub struct KeyboardEnter<'a> {
     pub serial: u32,
     pub surface: ObjectId,
     pub modifiers: u32,
     pub epoch: u32,
+    /// Physical positions, as HID usages.
+    pub held: &'a [u32],
 }
 
-impl KeyboardEnter {
+impl<'a> KeyboardEnter<'a> {
     /// # Errors
     ///
-    /// Returns [`DecodeError`] when the payload is not the four fields the table names.
-    pub fn decode(input: &[u8]) -> Result<Self, DecodeError> {
+    /// Returns [`DecodeError`] when the payload is not the five fields the table names.
+    pub fn decode(input: &'a [u8], out: &'a mut [u32]) -> Result<Self, DecodeError> {
         let mut decoder = Decoder::new(input);
-        let value = Self {
-            serial: decoder.read_u32()?,
-            surface: ObjectId::from_raw(decoder.read_u32()?),
-            modifiers: decoder.read_u32()?,
-            epoch: decoder.read_u32()?,
-        };
+        let serial = decoder.read_u32()?;
+        let surface = ObjectId::from_raw(decoder.read_u32()?);
+        let modifiers = decoder.read_u32()?;
+        let epoch = decoder.read_u32()?;
+        let count = decoder.read_array_len()? as usize;
+        if count > out.len() {
+            return Err(DecodeError::SizeOverflow);
+        }
+        for slot in out.iter_mut().take(count) {
+            *slot = decoder.read_u32()?;
+        }
         decoder.finish()?;
-        Ok(value)
+        Ok(Self {
+            serial,
+            surface,
+            modifiers,
+            epoch,
+            held: &out[..count],
+        })
     }
 }
 
-impl EncodePayload for KeyboardEnter {
+impl EncodePayload for KeyboardEnter<'_> {
     fn encoded_len(&self) -> Result<usize, EncodeError> {
-        Ok(16)
+        20_usize
+            .checked_add(
+                self.held
+                    .len()
+                    .checked_mul(4)
+                    .ok_or(EncodeError::SizeOverflow)?,
+            )
+            .ok_or(EncodeError::SizeOverflow)
     }
 
     fn encode(&self, encoder: &mut Encoder<'_>) -> Result<(), EncodeError> {
         encoder.write_u32(self.serial)?;
         encoder.write_u32(self.surface.into_raw())?;
         encoder.write_u32(self.modifiers)?;
-        encoder.write_u32(self.epoch)
+        encoder.write_u32(self.epoch)?;
+        let count = u32::try_from(self.held.len()).map_err(|_| EncodeError::SizeOverflow)?;
+        encoder.write_array_len(count)?;
+        for key in self.held {
+            encoder.write_u32(*key)?;
+        }
+        Ok(())
     }
 }
 
