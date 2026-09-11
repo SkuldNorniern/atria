@@ -2,8 +2,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use atria_compositor::{
     BufferDescriptor, BufferState, BufferTransport, ClientRequest, CompositorState, ConnectionId,
-    ConnectionLimits, Damage, ErrorCode, EventKind, FocusEvent, NegotiationError, ObjectKind,
-    Point, Rect, SeatCapabilities, ServerLimits, Size, StateError, SurfaceKey, SurfaceRole,
+    ConnectionLimits, Damage, EventKind, FocusEvent, NegotiationError, ObjectKind, Point, Rect,
+    SeatCapabilities, ServerLimits, Size, StateError, SurfaceKey, SurfaceRole,
 };
 use atria_protocol::ObjectId;
 use atria_protocol::capability::{Capability, CapabilitySet};
@@ -226,24 +226,25 @@ fn exceeding_per_connection_surface_quota_is_recoverable() {
 }
 
 #[test]
-fn commit_before_attach_is_an_object_error_and_destroys_only_surface() {
+fn committing_a_surface_that_has_never_had_content_shows_nothing() {
     let mut state = state_with_limits(ConnectionLimits::default());
     let client = connect(&mut state);
     create_session(&mut state, client, 256);
     create_surface(&mut state, client, 257);
 
-    let result = state.dispatch(client, ClientRequest::Commit { surface: id(257) });
+    state
+        .dispatch(client, ClientRequest::Commit { surface: id(257) })
+        .unwrap_or_else(|error| panic!("a commit need not attach: {error:?}"));
 
-    assert_eq!(result, Err(StateError::InvalidState { object_id: id(257) }));
-    assert_eq!(ErrorCode::InvalidState.category(), ErrorCategory::Object);
-    assert!(state.is_connected(client));
-    assert!(state.surface_snapshot(client, id(257)).is_none());
-    let second = state.dispatch(client, ClientRequest::Commit { surface: id(257) });
-    assert!(matches!(second, Err(StateError::InvalidObject { .. })));
     assert!(
-        !state.is_connected(client),
-        "referencing the destroyed object is fatal"
+        state.surface_snapshot(client, id(257)).is_none(),
+        "a surface nothing has drawn into has no content to show"
     );
+    assert!(
+        state.stacking_order().is_empty(),
+        "and nothing without content belongs in the scene"
+    );
+    assert!(state.is_connected(client));
 }
 
 #[test]
@@ -820,5 +821,143 @@ fn placing_a_surface_survives_a_later_commit() {
         state.surface_position(key),
         Some(Point { x: 40, y: 25 }),
         "drawing again does not move a window back to the origin"
+    );
+}
+
+#[test]
+fn a_commit_without_an_attach_keeps_the_content_already_shown() {
+    let mut state = state_with_limits(ConnectionLimits::default());
+    let client = connect(&mut state);
+    create_session(&mut state, client, 9);
+    create_surface(&mut state, client, 257);
+    import_buffer(&mut state, client, 300);
+    attach_and_commit(&mut state, client, 257, 300);
+
+    let first = state
+        .surface_snapshot(client, id(257))
+        .expect("content after the first commit")
+        .commit;
+
+    state
+        .dispatch(
+            client,
+            ClientRequest::Damage {
+                surface: id(257),
+                rect: Rect {
+                    x: 0,
+                    y: 0,
+                    width: 4,
+                    height: 4,
+                },
+            },
+        )
+        .unwrap_or_else(|error| panic!("damage must stage: {error:?}"));
+    state
+        .dispatch(client, ClientRequest::Commit { surface: id(257) })
+        .unwrap_or_else(|error| panic!("a state-only commit must succeed: {error:?}"));
+
+    let second = state
+        .surface_snapshot(client, id(257))
+        .expect("content survives a commit that attached nothing");
+    assert_eq!(
+        second.buffer,
+        id(300),
+        "the surface still shows the buffer it was given"
+    );
+    assert!(
+        second.commit > first,
+        "and the commit that carried it forward is a new one"
+    );
+}
+
+#[test]
+fn attaching_nothing_takes_the_surface_out_of_the_scene_and_returns_its_buffer() {
+    let mut state = state_with_limits(ConnectionLimits::default());
+    let client = connect(&mut state);
+    create_session(&mut state, client, 9);
+    create_surface(&mut state, client, 257);
+    import_buffer(&mut state, client, 300);
+    attach_and_commit(&mut state, client, 257, 300);
+    assert_eq!(state.stacking_order().len(), 1);
+    let _ = state.take_events();
+
+    state
+        .dispatch(
+            client,
+            ClientRequest::Attach {
+                surface: id(257),
+                buffer: ObjectId::NULL,
+                offset: Point::default(),
+                acquire_fence: None,
+            },
+        )
+        .unwrap_or_else(|error| panic!("a null attach must be accepted: {error:?}"));
+    state
+        .dispatch(client, ClientRequest::Commit { surface: id(257) })
+        .unwrap_or_else(|error| panic!("the detaching commit must succeed: {error:?}"));
+
+    assert!(
+        state.surface_snapshot(client, id(257)).is_none(),
+        "the surface shows nothing once it is detached"
+    );
+    assert!(
+        state.stacking_order().is_empty(),
+        "and a surface showing nothing is not in the scene"
+    );
+    assert_eq!(
+        state.buffer_state(client, id(300)),
+        Some(BufferState::Available),
+        "the buffer goes back to the client rather than being held forever"
+    );
+    let told: Vec<_> = state
+        .take_events()
+        .into_iter()
+        .filter(|event| event.object_id == id(300))
+        .map(|event| event.kind)
+        .collect();
+    assert_eq!(
+        told,
+        vec![EventKind::BufferRelease],
+        "and the client is told, because a buffer it does not know is free is a buffer it cannot reuse"
+    );
+}
+
+#[test]
+fn a_detached_surface_returns_to_the_place_it_was_given() {
+    let mut state = state_with_limits(ConnectionLimits::default());
+    let client = connect(&mut state);
+    create_session(&mut state, client, 9);
+    create_surface(&mut state, client, 257);
+    import_buffer(&mut state, client, 300);
+    attach_and_commit(&mut state, client, 257, 300);
+
+    let key = SurfaceKey {
+        connection: client,
+        object_id: id(257),
+    };
+    state
+        .place_surface(key, Point { x: 60, y: 12 })
+        .unwrap_or_else(|error| panic!("a placement must succeed: {error:?}"));
+
+    state
+        .dispatch(
+            client,
+            ClientRequest::Attach {
+                surface: id(257),
+                buffer: ObjectId::NULL,
+                offset: Point::default(),
+                acquire_fence: None,
+            },
+        )
+        .expect("null attach");
+    state
+        .dispatch(client, ClientRequest::Commit { surface: id(257) })
+        .expect("detaching commit");
+    attach_and_commit(&mut state, client, 257, 300);
+
+    assert_eq!(
+        state.surface_position(key),
+        Some(Point { x: 60, y: 12 }),
+        "a window that stopped drawing and started again is the same window"
     );
 }

@@ -134,9 +134,26 @@ struct SessionState {
     active: bool,
 }
 
+/// What a commit will do to the surface's content.
+///
+/// Three outcomes, named rather than inferred from an `Option`. A commit that attaches nothing is
+/// not the same as a commit that attaches nothing *on purpose*: the first keeps the content the
+/// surface already has, the second takes it away. An `Option` cannot tell them apart, so it made
+/// state-only commits unrepresentable and the code rejected them.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum PendingAttachment {
+    /// No attach since the last commit. The surface keeps whatever it is already showing.
+    #[default]
+    Unchanged,
+    /// A buffer to show from this commit onwards.
+    Set(ObjectId, Point),
+    /// A null attach. The surface stops showing anything and leaves the scene.
+    Detach,
+}
+
 #[derive(Clone, Debug, Default)]
 struct PendingSurface {
-    attachment: Option<(ObjectId, Point)>,
+    attachment: PendingAttachment,
     acquire_fence: Option<ObjectId>,
     damage: Vec<Damage>,
     refresh_range: Option<(u32, u32)>,
@@ -637,27 +654,37 @@ impl CompositorState {
         acquire_fence: Option<ObjectId>,
     ) -> Result<(), StateError> {
         self.expect_kind(connection, surface, ObjectKind::Surface)?;
-        self.expect_kind(connection, buffer, ObjectKind::Buffer)?;
-        if let Some(fence) = acquire_fence {
-            self.require_capability(connection, surface, Capability::ExplicitGpuFence)?;
-            self.expect_kind(connection, fence, ObjectKind::Fence)?;
-        }
         let key = SurfaceKey {
             connection,
             object_id: surface,
         };
-        let old_pending = self.surface(connection, surface)?.pending.attachment;
         // §7 says attach MUST be followed by commit and does not define replacement of an
         // uncommitted attachment. Rejecting a second attach avoids ambiguous release behavior.
-        if old_pending.is_some() {
+        if self.surface(connection, surface)?.pending.attachment != PendingAttachment::Unchanged {
             return Err(StateError::InvalidState { object_id: surface });
+        }
+
+        // A null buffer is the request to show nothing. There is no buffer to fence against, so a
+        // fence alongside it would have nothing to wait on.
+        if buffer.is_null() {
+            if acquire_fence.is_some() {
+                return Err(StateError::InvalidState { object_id: surface });
+            }
+            self.surface_mut(connection, surface)?.pending.attachment = PendingAttachment::Detach;
+            return Ok(());
+        }
+
+        self.expect_kind(connection, buffer, ObjectKind::Buffer)?;
+        if let Some(fence) = acquire_fence {
+            self.require_capability(connection, surface, Capability::ExplicitGpuFence)?;
+            self.expect_kind(connection, fence, ObjectKind::Fence)?;
         }
         if self.buffer(connection, buffer)?.state != BufferState::Available {
             return Err(StateError::InvalidState { object_id: buffer });
         }
         self.set_buffer_state(connection, buffer, BufferState::Pending { surface: key })?;
         let state = self.surface_mut(connection, surface)?;
-        state.pending.attachment = Some((buffer, offset));
+        state.pending.attachment = PendingAttachment::Set(buffer, offset);
         state.pending.acquire_fence = acquire_fence;
         Ok(())
     }
@@ -684,20 +711,37 @@ impl CompositorState {
         if self.next_commit == u64::MAX {
             return Err(StateError::QuotaExceeded { object_id: surface });
         }
-        let (
-            buffer,
-            offset,
-            damage,
-            refresh_range,
-            frame_callback,
-            frame_serial,
-            role,
-            acquire_fence,
-        ) = {
+        let key = SurfaceKey {
+            connection,
+            object_id: surface,
+        };
+
+        // A commit that attaches nothing keeps the content the surface already has. That is what
+        // lets a client change damage, refresh range or a role's state without redrawing, and it
+        // is why the attachment is a three-way choice rather than a missing value.
+        let carried = match self.surface(connection, surface)?.pending.attachment {
+            PendingAttachment::Set(buffer, offset) => Some((buffer, offset)),
+            PendingAttachment::Unchanged => self
+                .surface_snapshot(connection, surface)
+                .map(|snapshot| (snapshot.buffer, snapshot.offset)),
+            PendingAttachment::Detach => None,
+        };
+
+        if self.surface(connection, surface)?.pending.attachment == PendingAttachment::Detach {
+            self.detach(key)?;
+        }
+
+        let Some((buffer, offset)) = carried else {
+            // Nothing to show: either the surface was detached, or it has never had content and
+            // this commit did not give it any. Both are ordinary states, not errors.
             let state = self.surface_mut(connection, surface)?;
-            let Some((buffer, offset)) = state.pending.attachment.take() else {
-                return Err(StateError::InvalidState { object_id: surface });
-            };
+            state.pending = PendingSurface::default();
+            return Ok(());
+        };
+
+        let (damage, refresh_range, frame_callback, frame_serial, role, acquire_fence) = {
+            let state = self.surface_mut(connection, surface)?;
+            state.pending.attachment = PendingAttachment::Unchanged;
             let damage = if state.pending.damage.is_empty() {
                 alloc::vec![Damage::Full]
             } else {
@@ -713,8 +757,6 @@ impl CompositorState {
             let callback = take(&mut state.frame_requested);
             let frame_serial = state.frame_serial;
             (
-                buffer,
-                offset,
                 damage,
                 refresh_range,
                 callback,
@@ -725,10 +767,6 @@ impl CompositorState {
         };
         let commit = CommitId(self.next_commit);
         self.next_commit += 1;
-        let key = SurfaceKey {
-            connection,
-            object_id: surface,
-        };
         self.set_buffer_state(
             connection,
             buffer,
@@ -752,6 +790,27 @@ impl CompositorState {
             frame_serial,
         });
         self.map(key);
+        Ok(())
+    }
+
+    /// Take a surface's content away and remove it from the scene.
+    ///
+    /// The buffer the surface was holding goes back to the client, because nothing is showing it
+    /// any more and a buffer the compositor holds forever is a buffer the client can never reuse.
+    /// The surface's position is kept: a client that detaches and attaches again is the same
+    /// window, and a shell that placed it should not have to place it twice.
+    fn detach(&mut self, surface: SurfaceKey) -> Result<(), StateError> {
+        let Some(held) = self
+            .surface_snapshot(surface.connection, surface.object_id)
+            .map(|snapshot| snapshot.buffer)
+        else {
+            return Ok(());
+        };
+        self.set_buffer_state(surface.connection, held, BufferState::Available)?;
+        self.push_event(surface.connection, held, EventKind::BufferRelease);
+        self.surface_mut(surface.connection, surface.object_id)?
+            .current = None;
+        self.scene.stack.retain(|entry| *entry != surface);
         Ok(())
     }
 
@@ -1462,12 +1521,11 @@ impl CompositorState {
             if let Some(client) = self.connections.get_mut(&connection) {
                 for entry in client.registry.live.values_mut() {
                     if let Object::Surface(surface) = &mut entry.value {
-                        if surface
-                            .pending
-                            .attachment
-                            .is_some_and(|(id, _)| id == object_id)
-                        {
-                            surface.pending.attachment = None;
+                        if matches!(
+                            surface.pending.attachment,
+                            PendingAttachment::Set(id, _) if id == object_id
+                        ) {
+                            surface.pending.attachment = PendingAttachment::Unchanged;
                         }
                         if surface
                             .current
