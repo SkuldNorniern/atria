@@ -1,11 +1,12 @@
 //! The authority a shell holds, and what a shell sees when it takes over from one that died.
 
 use atria_compositor::{
-    ClientRequest, CompositorState, ConnectionId, ConnectionLimits, Point, ServerLimits,
-    ShellError, Size, TitleText, ToplevelHandle,
+    ClientRequest, CompositorState, ConnectionId, ConnectionLimits, EventKind, ObjectKind, Point,
+    ServerLimits, ShellError, Size, TitleText, ToplevelHandle,
 };
 use atria_protocol::ObjectId;
 use atria_protocol::capability::{Capability, CapabilitySet};
+use atria_protocol::interface::Interface;
 use atria_protocol::interface::toplevel_state;
 
 fn id(raw: u32) -> ObjectId {
@@ -13,11 +14,15 @@ fn id(raw: u32) -> ObjectId {
 }
 
 fn server() -> CompositorState {
-    CompositorState::new(
+    let mut state = CompositorState::new(
         CapabilitySet::default_grants().with(Capability::ShellControl),
         ServerLimits::default(),
         ConnectionLimits::default(),
-    )
+    );
+    state
+        .advertise_global(ObjectKind::ShellControl, 1)
+        .unwrap_or_else(|| panic!("the shell authority is advertised"));
+    state
 }
 
 /// An ordinary application: a connection with no shell authority, holding one window.
@@ -262,4 +267,228 @@ fn an_application_dying_retires_the_windows_it_held() {
         state.shell_raise(elysium, handle),
         Err(ShellError::UnknownHandle { handle })
     );
+}
+
+/// A shell attaching to a running compositor is told the world, then told the telling is over.
+///
+/// This is the boundary that makes a replacement shell possible. Without it a shell would have to
+/// enumerate what exists while changes to it were already arriving, and race the compositor for
+/// its own starting picture.
+#[test]
+fn a_shell_binding_is_told_every_window_and_where_the_telling_ends() {
+    let mut state = server();
+    let (_, first) = application(&mut state, "ledger");
+    let (_, second) = application(&mut state, "map");
+
+    let shell = shell(&mut state);
+    state
+        .dispatch(shell, ClientRequest::CreateRegistry { new_id: id(2) })
+        .unwrap_or_else(|error| panic!("a registry: {error:?}"));
+    let control = state
+        .take_events()
+        .into_iter()
+        .find_map(|event| match event.kind {
+            EventKind::Global {
+                name,
+                interface: Interface::ShellControl,
+                ..
+            } => Some(name),
+            _ => None,
+        })
+        .expect("the shell authority is offered as a global");
+
+    state
+        .dispatch(
+            shell,
+            ClientRequest::Bind {
+                name: control,
+                version: 1,
+                new_id: id(3),
+            },
+        )
+        .unwrap_or_else(|error| panic!("the shell binds its authority: {error:?}"));
+
+    let told: Vec<_> = state
+        .take_events()
+        .into_iter()
+        .filter(|event| event.object_id == id(3))
+        .map(|event| event.kind)
+        .collect();
+
+    assert_eq!(
+        told,
+        vec![
+            EventKind::ShellToplevel {
+                handle: first,
+                title: String::from("ledger"),
+            },
+            EventKind::ShellToplevel {
+                handle: second,
+                title: String::from("map"),
+            },
+            EventKind::ShellFocusChanged {
+                handle: ToplevelHandle(0),
+            },
+            EventKind::ShellSnapshotDone,
+        ],
+        "every window that already existed, then the line that says the snapshot is whole"
+    );
+}
+
+/// A replacement shell is given the same handles the dead one held.
+///
+/// The applications never learn that their shell died. A handle is compositor-wide and never
+/// reused, so an arrangement keyed to one survives the program that made it — which is the
+/// difference between restarting the shell and restarting the session.
+#[test]
+fn a_replacement_shell_receives_the_handles_its_predecessor_held() {
+    let mut state = server();
+    let (_, window) = application(&mut state, "ledger");
+
+    let first = shell(&mut state);
+    state
+        .shell_place(first, window, Point { x: 40, y: 25 })
+        .unwrap_or_else(|error| panic!("the shell arranges it: {error:?}"));
+
+    // The shell dies. Nothing about that is the application's business.
+    state.close_connection(first);
+    assert_eq!(
+        state.shell_toplevels().len(),
+        1,
+        "the window outlives the program that was arranging it"
+    );
+
+    let replacement = shell(&mut state);
+    state
+        .dispatch(replacement, ClientRequest::CreateRegistry { new_id: id(2) })
+        .unwrap_or_else(|error| panic!("a registry: {error:?}"));
+    let control = state
+        .take_events()
+        .into_iter()
+        .find_map(|event| match event.kind {
+            EventKind::Global {
+                name,
+                interface: Interface::ShellControl,
+                ..
+            } => Some(name),
+            _ => None,
+        })
+        .expect("the authority is offered again");
+    state
+        .dispatch(
+            replacement,
+            ClientRequest::Bind {
+                name: control,
+                version: 1,
+                new_id: id(3),
+            },
+        )
+        .unwrap_or_else(|error| panic!("the replacement binds: {error:?}"));
+
+    let handles: Vec<_> = state
+        .take_events()
+        .into_iter()
+        .filter_map(|event| match event.kind {
+            EventKind::ShellToplevel { handle, .. } => Some(handle),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        handles,
+        vec![window],
+        "the same window answers to the same handle it always did"
+    );
+
+    // And the replacement can arrange it, over the wire, by that handle.
+    state
+        .dispatch(
+            replacement,
+            ClientRequest::ShellPlace {
+                control: id(3),
+                handle: window,
+                position: Point { x: 7, y: 9 },
+            },
+        )
+        .unwrap_or_else(|error| panic!("the replacement arranges it: {error:?}"));
+}
+
+/// A program without the grant cannot arrange windows even holding a shell-control object.
+#[test]
+fn arranging_over_the_wire_still_requires_the_grant() {
+    let mut state = server();
+    let (_, window) = application(&mut state, "ledger");
+    let ungranted = state
+        .connect(CapabilitySet::default_grants(), CapabilitySet::empty())
+        .unwrap_or_else(|error| panic!("an ordinary program connects: {error:?}"));
+
+    let refused = state.dispatch(
+        ungranted,
+        ClientRequest::ShellRaise {
+            control: id(3),
+            handle: window,
+        },
+    );
+    assert!(
+        refused.is_err(),
+        "authority is checked on the request, not only when the object was bound"
+    );
+}
+
+/// An ungranted program cannot even take hold of the authority object.
+///
+/// Checked at the bind as well as on every request. Refusing only the requests would leave an
+/// ordinary client holding an object whose whole purpose is a power it does not have, and the
+/// only thing standing between it and every window would be a check somewhere else.
+#[test]
+fn binding_the_shell_authority_requires_the_grant() {
+    let mut state = server();
+    let ungranted = state
+        .connect(CapabilitySet::default_grants(), CapabilitySet::empty())
+        .unwrap_or_else(|error| panic!("an ordinary program connects: {error:?}"));
+
+    state
+        .dispatch(ungranted, ClientRequest::CreateRegistry { new_id: id(2) })
+        .unwrap_or_else(|error| panic!("a registry: {error:?}"));
+    let control = state
+        .take_events()
+        .into_iter()
+        .find_map(|event| match event.kind {
+            EventKind::Global {
+                name,
+                interface: Interface::ShellControl,
+                ..
+            } => Some(name),
+            _ => None,
+        })
+        .expect("the global is announced to everyone, because what exists is not a secret");
+
+    let refused = state.dispatch(
+        ungranted,
+        ClientRequest::Bind {
+            name: control,
+            version: 1,
+            new_id: id(3),
+        },
+    );
+    assert!(
+        refused.is_err(),
+        "and taking hold of it is refused without the grant"
+    );
+
+    // A granted shell binds the same global without trouble.
+    let shell = shell(&mut state);
+    state
+        .dispatch(shell, ClientRequest::CreateRegistry { new_id: id(2) })
+        .expect("a registry");
+    let _ = state.take_events();
+    state
+        .dispatch(
+            shell,
+            ClientRequest::Bind {
+                name: control,
+                version: 1,
+                new_id: id(3),
+            },
+        )
+        .unwrap_or_else(|error| panic!("a granted shell binds it: {error:?}"));
 }
