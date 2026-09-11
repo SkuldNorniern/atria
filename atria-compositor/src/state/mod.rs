@@ -279,6 +279,12 @@ struct TextField {
     connection: ConnectionId,
     object: ObjectId,
     purpose: TextPurpose,
+    /// Where the caret is, in the surface's own coordinates.
+    ///
+    /// Kept so a shell can put a candidate window beside it rather than over it. Nothing places
+    /// one yet; storing what the field said is still better than accepting it and discarding it,
+    /// which would make the request a claim the compositor does not honour.
+    caret: Rect,
 }
 
 /// Where a seat's keys are.
@@ -634,6 +640,7 @@ impl CompositorState {
                         connection,
                         object: text_input,
                         purpose,
+                        caret: Rect::default(),
                     },
                 );
                 self.refresh_composition();
@@ -647,7 +654,15 @@ impl CompositorState {
             }
             ClientRequest::SetCursorArea { text_input, area } => {
                 self.expect_kind(connection, text_input, ObjectKind::TextInput)?;
-                let _ = area;
+                if let Some(field) = self.fields.get_mut(&(connection, text_input)) {
+                    field.caret = area;
+                }
+                if let Some(composing) = self.composing.as_mut()
+                    && composing.connection == connection
+                    && composing.object == text_input
+                {
+                    composing.caret = area;
+                }
                 Ok(())
             }
             ClientRequest::SetPreedit {

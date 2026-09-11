@@ -7,9 +7,16 @@
 use atria_protocol::ObjectId;
 
 use super::CompositorState;
-use crate::model::{EventKind, TextBuffer};
+use crate::model::{EventKind, Rect, TextBuffer};
 
 impl CompositorState {
+    /// Where the caret of the field being composed into is, for a shell placing a candidate
+    /// window. Nothing is being composed into means there is nowhere to put one.
+    #[must_use]
+    pub fn composing_caret(&self) -> Option<Rect> {
+        self.composing.map(|field| field.caret)
+    }
+
     /// Whatever the method should be composing into now, told to both sides.
     ///
     /// The field the method composes into follows keyboard focus: text goes where the keys would
