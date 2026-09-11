@@ -691,3 +691,34 @@ fn a_window_with_no_title_is_still_announced() {
         "taking a window role is what announces a window, not naming it"
     );
 }
+
+/// A window whose program died reaches the shell the same as one deliberately closed.
+///
+/// Crashing is the ordinary way a window disappears. A shell told only about deliberate
+/// destruction would go on drawing windows whose programs are gone.
+#[test]
+fn a_shell_is_told_when_a_clients_death_takes_its_windows() {
+    let mut state = server();
+    let shell = attached_shell(&mut state);
+    let (client, window) = application(&mut state, "ledger");
+    let _ = state.take_events();
+
+    state.close_connection(client);
+
+    let told: Vec<_> = state
+        .take_events()
+        .into_iter()
+        .filter(|event| event.connection == shell)
+        .map(|event| event.kind)
+        .collect();
+    assert!(
+        told.iter().any(
+            |kind| matches!(kind, EventKind::ShellToplevelGone { handle } if *handle == window)
+        ),
+        "the shell learns the window is gone rather than discovering it"
+    );
+    assert!(
+        state.shell_toplevels().is_empty(),
+        "and the compositor no longer holds it either"
+    );
+}
