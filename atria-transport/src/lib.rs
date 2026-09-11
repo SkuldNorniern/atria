@@ -15,6 +15,7 @@ pub use backend::unix::MAX_HANDLES;
 pub use error::TransportError;
 pub use memory::SharedMemoryStore;
 
+use std::mem::take;
 use std::os::fd::OwnedFd;
 
 use atria_compositor::{HandleResolver, ResolveError, SharedMemory};
@@ -35,6 +36,16 @@ impl Envelope {
     #[must_use]
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
+    }
+
+    /// Take the message's bytes, leaving the handles behind.
+    ///
+    /// The two halves of an envelope are independent, and decoding needs the bytes while
+    /// resolution needs the handles. Taking the bytes out separates the borrows instead of
+    /// forcing a decoded request to own everything it read.
+    #[must_use]
+    pub fn take_bytes(&mut self) -> Vec<u8> {
+        take(&mut self.bytes)
     }
 
     /// How many handles arrived with this message.

@@ -119,7 +119,10 @@ impl Session {
 
     /// Decode, resolve and dispatch one message.
     fn act(&mut self, state: &mut CompositorState, envelope: &mut Envelope) -> Result<(), Refused> {
-        let frame = Frame::decode(envelope.bytes()).map_err(|_| Refused::Protocol)?;
+        // The bytes come out of the envelope so decoding borrows them while resolution mutates
+        // the handles that stayed behind.
+        let bytes = envelope.take_bytes();
+        let frame = Frame::decode(&bytes).map_err(|_| Refused::Protocol)?;
         let kind = state
             .object_kind(self.connection, frame.header.object_id)
             .ok_or(Refused::Protocol)?;
