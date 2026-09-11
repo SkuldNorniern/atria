@@ -5,6 +5,8 @@ use std::fmt;
 use std::io::{self, ErrorKind, Read, Write};
 use std::mem::take;
 use std::net::{TcpListener, TcpStream};
+use std::os::fd::{AsFd, BorrowedFd};
+use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread;
 use std::time::Duration;
@@ -101,6 +103,9 @@ const MAX_PENDING_INPUT: usize = 256;
 pub struct VncSink {
     latest: Arc<Latest>,
     frames_composed: u64,
+    /// Read end of the pair the viewer thread writes to when input arrives, so a server waiting
+    /// on descriptors wakes on a pointer the instant it moves.
+    waker: UnixStream,
 }
 
 /// The viewer side: everything that touches the network, on its own thread.
@@ -109,6 +114,7 @@ struct Viewer {
     latest: Arc<Latest>,
     size: (u16, u16),
     name: String,
+    waker: UnixStream,
 }
 
 impl VncSink {
@@ -122,11 +128,15 @@ impl VncSink {
     pub fn bind(address: &str, width: u16, height: u16, name: &str) -> Result<Self, VncError> {
         let listener = TcpListener::bind(address)?;
         let latest = Arc::new(Latest::default());
+        let (waker, signal) = UnixStream::pair()?;
+        waker.set_nonblocking(true)?;
+        signal.set_nonblocking(true)?;
         let viewer = Viewer {
             listener,
             latest: Arc::clone(&latest),
             size: (width, height),
             name: String::from(name),
+            waker: signal,
         };
         thread::Builder::new()
             .name(String::from("atria-vnc"))
@@ -134,6 +144,7 @@ impl VncSink {
         Ok(Self {
             latest,
             frames_composed: 0,
+            waker,
         })
     }
 
@@ -143,9 +154,23 @@ impl VncSink {
         self.frames_composed
     }
 
+    /// A descriptor that becomes readable when a viewer has done something.
+    ///
+    /// A server can wait on this alongside its own sockets instead of polling on a timer, which
+    /// is the difference between a pointer being read now and being read some milliseconds from
+    /// now.
+    #[must_use]
+    pub fn wakeup(&self) -> BorrowedFd<'_> {
+        self.waker.as_fd()
+    }
+
     /// Take what the viewer has done since this was last called.
     #[must_use]
     pub fn take_input(&self) -> Vec<PointerInput> {
+        // Drain whatever woke us, so the descriptor stops being readable until the next report.
+        let mut discard = [0_u8; 64];
+        while (&self.waker).read(&mut discard).is_ok_and(|read| read > 0) {}
+
         let mut held = self
             .latest
             .input
@@ -159,49 +184,66 @@ impl Viewer {
     /// Accept one viewer at a time, forever. A viewer that fails is dropped and the next is
     /// accepted; nothing about a broken connection reaches the compositor.
     fn serve(self) {
+        // Non-blocking, so a viewer arriving while another is attached is noticed rather than
+        // left in the backlog. One at a time, and the newest wins: a viewer that reconnects
+        // before its old socket is noticed would otherwise wait behind itself.
+        if self.listener.set_nonblocking(true).is_err() {
+            return;
+        }
         loop {
-            let Ok((mut stream, _)) = self.listener.accept() else {
-                return;
-            };
-            if let Err(error) = self.handshake(&mut stream) {
-                eprintln!("atria-vnc: a viewer could not be served: {error}");
+            let Some(mut stream) = self.accept() else {
+                thread::sleep(VIEWER_TICK);
                 continue;
-            }
-            // A viewer that connects after the last composition still sees it. The output has a
+            };
+            // A viewer connecting after the last composition still sees it: the output has a
             // current state whether or not anything changed while somebody was watching.
             let mut shown = 0;
             let mut asked = false;
+            // A full request must be answered whole, whatever the diff says. A viewer asks after
+            // a resize or an expose, and a diff leaves it showing nothing until something moves.
+            let mut asked_whole = false;
             let mut format = PixelFormat::declared();
-            // What this viewer was last sent, so the next frame can be compared against it. Per
-            // viewer rather than per output: two viewers may be at different frames, and a
-            // rectangle list is only correct against the frame it was computed from.
+            // What this viewer was last sent. Per viewer: a rectangle list is only correct
+            // against the frame it was computed from.
             let mut sent: Option<Vec<u8>> = None;
-            // Raw until the viewer says otherwise. Every viewer understands raw, and a server
-            // that assumed anything else would be unreadable to one that had not asked for it.
+            // Raw until the viewer asks for something else.
             let mut hextile = false;
             loop {
+                // A newer viewer replaces this one. Nothing is shared between them, so the new
+                // one starts from a whole frame.
+                if let Some(replacement) = self.accept() {
+                    stream = replacement;
+                    shown = 0;
+                    asked = false;
+                    asked_whole = false;
+                    format = PixelFormat::declared();
+                    sent = None;
+                    hextile = false;
+                }
                 // Read first, always. This is where a viewer's input arrives and where its
                 // departure is noticed, and a server that only read before writing would stop
                 // hearing from a viewer that had stopped asking for frames.
-                if let Err(error) =
-                    self.drain_requests(&mut stream, &mut asked, &mut format, &mut hextile)
-                {
+                if let Err(error) = self.drain_requests(
+                    &mut stream,
+                    &mut asked,
+                    &mut asked_whole,
+                    &mut format,
+                    &mut hextile,
+                ) {
                     report(&error);
                     break;
                 }
-                // Sent only when asked for. RFB puts the client in charge of when a frame
-                // arrives, and pushing one at a client that is not reading fills the socket and
-                // blocks this thread — which is how a viewer stops being able to send input at
-                // all.
+                // Sent only when asked for. Pushing one at a client that is not reading fills
+                // the socket and blocks this thread, and its input with it.
                 if asked && let Some(frame) = self.frame_after(shown) {
                     shown = frame.0;
-                    let regions =
-                        changed_regions(sent.as_deref(), &frame.1, self.size.0, self.size.1);
-                    // Nothing changed where this viewer could see it. Its request stays
-                    // outstanding rather than being answered with an empty update, so the next
-                    // frame that does change something reaches it without being asked again.
+                    let previous = if asked_whole { None } else { sent.as_deref() };
+                    let regions = changed_regions(previous, &frame.1, self.size.0, self.size.1);
+                    // Nothing changed. The request stays outstanding rather than being answered
+                    // empty, so the next frame that does change something reaches it unasked.
                     if !regions.is_empty() {
                         asked = false;
+                        asked_whole = false;
                         if let Err(error) = write_update(
                             &mut stream,
                             &regions,
@@ -222,13 +264,26 @@ impl Viewer {
     }
 }
 
-/// How long the viewer sleeps before looking at its connection again.
-///
-/// Short, because this is also how often a viewer's pointer is read. A frame being composed wakes
-/// it sooner, so the interval only bounds how long an idle compositor takes to notice input.
-const VIEWER_TICK: Duration = Duration::from_millis(8);
+/// How long the viewer sleeps before reading its connection again. This bounds how long a pointer
+/// report waits before the compositor is told, so it is short.
+const VIEWER_TICK: Duration = Duration::from_millis(2);
 
 impl Viewer {
+    /// Take a waiting viewer, if one is there. Never waits.
+    fn accept(&self) -> Option<TcpStream> {
+        let (mut stream, _) = self.listener.accept().ok()?;
+        // An update is one write with nothing to coalesce it with. Waiting for more costs up to
+        // forty milliseconds a frame, which is most of the latency.
+        let _unused = stream.set_nodelay(true);
+        match self.handshake(&mut stream) {
+            Ok(()) => Some(stream),
+            Err(error) => {
+                eprintln!("atria-vnc: a viewer could not be served: {error}");
+                None
+            }
+        }
+    }
+
     /// The composed frame, if one newer than `shown` exists. Never waits.
     fn frame_after(&self, shown: u64) -> Option<(u64, Vec<u8>)> {
         let held = self
@@ -308,11 +363,12 @@ impl Viewer {
         &self,
         stream: &mut TcpStream,
         asked: &mut bool,
+        asked_whole: &mut bool,
         format: &mut PixelFormat,
         hextile: &mut bool,
     ) -> io::Result<()> {
         stream.set_nonblocking(true)?;
-        let outcome = self.drain(stream, asked, format, hextile);
+        let outcome = self.drain(stream, asked, asked_whole, format, hextile);
         stream.set_nonblocking(false)?;
         outcome
     }
@@ -332,12 +388,15 @@ impl Viewer {
             held.remove(0);
         }
         held.push(PointerInput { x, y, buttons });
+        drop(held);
+        let _unused = (&self.waker).write(&[1]);
     }
 
     fn drain(
         &self,
         stream: &mut TcpStream,
         asked: &mut bool,
+        asked_whole: &mut bool,
         format: &mut PixelFormat,
         hextile: &mut bool,
     ) -> io::Result<()> {
@@ -356,7 +415,7 @@ impl Viewer {
             if number[0] == client_message::FRAMEBUFFER_UPDATE_REQUEST {
                 *asked = true;
             }
-            let result = self.consume_body(stream, number[0], format, hextile);
+            let result = self.consume_body(stream, number[0], asked_whole, format, hextile);
             stream.set_nonblocking(true)?;
             result?;
         }
@@ -366,6 +425,7 @@ impl Viewer {
         &self,
         stream: &mut TcpStream,
         number: u8,
+        asked_whole: &mut bool,
         format: &mut PixelFormat,
         hextile: &mut bool,
     ) -> io::Result<()> {
@@ -374,6 +434,9 @@ impl Viewer {
             stream.read_exact(&mut body)?;
             if number == client_message::POINTER_EVENT {
                 self.record_pointer(&body);
+            }
+            if number == client_message::FRAMEBUFFER_UPDATE_REQUEST && body[0] == 0 {
+                *asked_whole = true;
             }
             if number == client_message::SET_PIXEL_FORMAT {
                 // Three bytes of padding, then the sixteen the format occupies.

@@ -280,6 +280,11 @@ const HEXTILE_SIDE: usize = 16;
 /// Hextile subencoding bits, from the specification.
 const HEXTILE_RAW: u8 = 1;
 const HEXTILE_BACKGROUND: u8 = 2;
+const HEXTILE_FOREGROUND: u8 = 4;
+const HEXTILE_SUBRECTS: u8 = 8;
+
+/// Subrectangles a square may carry before raw is cheaper.
+const MAX_SUBRECTS: usize = 255;
 
 /// Write one rectangle as hextile squares.
 fn write_hextile(
@@ -305,25 +310,96 @@ fn write_hextile(
                 &frame[start..start + 4]
             };
 
-            let first = at(0, 0);
-            let uniform = (0..tall).all(|row| (0..wide).all(|column| at(row, column) == first));
-            if uniform {
-                // One colour: the square is its background and nothing else.
-                message.push(HEXTILE_BACKGROUND);
-                format.write_into(first, &mut encoded);
-                message.extend_from_slice(&encoded);
-            } else {
-                message.push(HEXTILE_RAW);
-                for row in 0..tall {
-                    for column in 0..wide {
-                        format.write_into(at(row, column), &mut encoded);
+            let background = at(0, 0);
+            // A square crossing a window's edge holds two colours. Saying so costs a few bytes;
+            // sending it raw costs a kilobyte, and every edge of every window is such a square.
+            let other = (0..tall)
+                .flat_map(|row| (0..wide).map(move |column| (row, column)))
+                .map(|(row, column)| at(row, column))
+                .find(|colour| *colour != background);
+            let two_colours = other.is_some_and(|second| {
+                (0..tall).all(|row| {
+                    (0..wide).all(|column| {
+                        let colour = at(row, column);
+                        colour == background || colour == second
+                    })
+                })
+            });
+
+            match other {
+                None => {
+                    message.push(HEXTILE_BACKGROUND);
+                    format.write_into(background, &mut encoded);
+                    message.extend_from_slice(&encoded);
+                }
+                Some(foreground) if two_colours => {
+                    let runs = foreground_runs(&at, tall, wide, background);
+                    if runs.len() > MAX_SUBRECTS {
+                        write_raw_square(message, &at, tall, wide, format, &mut encoded);
+                    } else {
+                        message.push(HEXTILE_BACKGROUND | HEXTILE_FOREGROUND | HEXTILE_SUBRECTS);
+                        format.write_into(background, &mut encoded);
                         message.extend_from_slice(&encoded);
+                        format.write_into(foreground, &mut encoded);
+                        message.extend_from_slice(&encoded);
+                        message.push(runs.len() as u8);
+                        for (row, start, span) in runs {
+                            message.push(((start as u8) << 4) | (row as u8));
+                            // A run is one row tall, so the height nibble is zero.
+                            message.push(((span - 1) as u8) << 4);
+                        }
                     }
                 }
+                Some(_) => write_raw_square(message, &at, tall, wide, format, &mut encoded),
             }
             x += HEXTILE_SIDE;
         }
         y += HEXTILE_SIDE;
+    }
+}
+
+/// Runs of the non-background colour, one per row, as hextile subrectangles.
+fn foreground_runs<'a>(
+    at: &impl Fn(usize, usize) -> &'a [u8],
+    tall: usize,
+    wide: usize,
+    background: &[u8],
+) -> Vec<(usize, usize, usize)> {
+    let mut runs = Vec::new();
+    for row in 0..tall {
+        let mut start: Option<usize> = None;
+        for column in 0..wide {
+            let is_background = at(row, column) == background;
+            match (is_background, start) {
+                (false, None) => start = Some(column),
+                (true, Some(from)) => {
+                    runs.push((row, from, column - from));
+                    start = None;
+                }
+                _ => {}
+            }
+        }
+        if let Some(from) = start {
+            runs.push((row, from, wide - from));
+        }
+    }
+    runs
+}
+
+fn write_raw_square<'a>(
+    message: &mut Vec<u8>,
+    at: &impl Fn(usize, usize) -> &'a [u8],
+    tall: usize,
+    wide: usize,
+    format: PixelFormat,
+    encoded: &mut [u8],
+) {
+    message.push(HEXTILE_RAW);
+    for row in 0..tall {
+        for column in 0..wide {
+            format.write_into(at(row, column), encoded);
+            message.extend_from_slice(encoded);
+        }
     }
 }
 

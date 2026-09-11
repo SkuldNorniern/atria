@@ -188,3 +188,45 @@ fn a_square_that_is_not_one_colour_costs_one_byte_more_than_raw() {
         "one subencoding byte a square, and never more than that"
     );
 }
+
+#[test]
+fn a_square_of_two_colours_costs_its_edges_rather_than_its_pixels() {
+    // A window's edge crossing a square. Every edge of every window is one of these, so raw here
+    // is most of what a moving window costs.
+    let mut frame = blank();
+    paint(&mut frame, 0, 0, 100, 100, [0x2f, 0x9e, 0xd8, 0xff]);
+    let whole = [Region {
+        x: 0,
+        y: 0,
+        width: WIDTH,
+        height: HEIGHT,
+    }];
+
+    let mut raw = Vec::new();
+    write_update(
+        &mut raw,
+        &whole,
+        &frame,
+        WIDTH,
+        PixelFormat::declared(),
+        false,
+    )
+    .unwrap_or_else(|error| panic!("raw must encode: {error}"));
+    let mut hextile = Vec::new();
+    write_update(
+        &mut hextile,
+        &whole,
+        &frame,
+        WIDTH,
+        PixelFormat::declared(),
+        true,
+    )
+    .unwrap_or_else(|error| panic!("hextile must encode: {error}"));
+
+    assert!(
+        hextile.len() * 100 < raw.len(),
+        "an edge is a list of runs, not a square of pixels: {} against {}",
+        hextile.len(),
+        raw.len()
+    );
+}
