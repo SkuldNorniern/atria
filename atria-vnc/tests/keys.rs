@@ -35,6 +35,18 @@ fn the_named_keys_and_modifiers_are_known() {
     assert_eq!(usage_of_keysym(0xff52), Some(usage::UP));
     assert_eq!(usage_of_keysym(0xffe1), Some(usage::LEFT_SHIFT));
     assert_eq!(usage_of_keysym(0xffec), Some(usage::RIGHT_META));
+    // Super, Meta and Hyper are one physical key under three names, and which one a viewer sends
+    // is its keymap's business rather than the key's.
+    for left in [0xffeb_u32, 0xffe7, 0xffed] {
+        assert_eq!(
+            usage_of_keysym(left),
+            Some(usage::LEFT_META),
+            "keysym {left:#06x} is the same key"
+        );
+    }
+    for right in [0xffec_u32, 0xffe8, 0xffee] {
+        assert_eq!(usage_of_keysym(right), Some(usage::RIGHT_META));
+    }
     assert_eq!(usage_of_keysym(0xffbe), Some(usage::F1));
 }
 

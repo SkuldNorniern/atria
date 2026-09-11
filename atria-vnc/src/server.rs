@@ -1,5 +1,6 @@
 //! A single-client remote framebuffer server, driven by presented frames.
 
+use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
 use std::io::{self, ErrorKind, Read, Write};
@@ -77,6 +78,8 @@ struct Latest {
     frame: Mutex<(u64, Vec<u8>)>,
     composed: Condvar,
     input: Mutex<InputQueue>,
+    /// Keysyms this server could not place, so each is reported once rather than every press.
+    unplaced: Mutex<BTreeSet<u32>>,
 }
 
 /// A sink that shows the composed output to one connected viewer.
@@ -263,6 +266,9 @@ impl Viewer {
     }
 }
 
+/// How many distinct unplaced keysyms are named before the rest are passed over in silence.
+const MAX_REPORTED_KEYSYMS: usize = 64;
+
 /// How long the viewer sleeps before reading its connection again. This bounds how long a pointer
 /// report waits before the compositor is told, so it is short.
 const VIEWER_TICK: Duration = Duration::from_millis(2);
@@ -382,9 +388,26 @@ impl Viewer {
         let pressed = body[0] != 0;
         let keysym = u32::from_be_bytes([body[3], body[4], body[5], body[6]]);
         let Some(usage) = usage_of_keysym(keysym) else {
+            self.report_unplaced(keysym);
             return;
         };
         self.queue(|queue| queue.key(usage, pressed));
+    }
+
+    /// Name a keysym this server has no position for, once.
+    ///
+    /// A key that does nothing and says nothing is indistinguishable from a key the viewer never
+    /// sent. Saying which keysym arrived is the difference between a guess and a fix.
+    fn report_unplaced(&self, keysym: u32) {
+        let mut seen = self
+            .latest
+            .unplaced
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if seen.len() >= MAX_REPORTED_KEYSYMS || !seen.insert(keysym) {
+            return;
+        }
+        eprintln!("atria-vnc: the viewer sent keysym {keysym:#06x}, which has no known position");
     }
 
     fn queue(&self, act: impl FnOnce(&mut InputQueue)) {

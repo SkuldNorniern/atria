@@ -188,6 +188,12 @@ pub const fn usage_of_keysym(keysym: u32) -> Option<u32> {
         0xffea => Some(usage::RIGHT_ALT),
         0xffeb => Some(usage::LEFT_META),
         0xffec => Some(usage::RIGHT_META),
+        // Meta and Hyper as well as Super. Which of the three a viewer sends for the same
+        // physical key depends on its keymap, and the key is in the same place regardless.
+        0xffe7 => Some(usage::LEFT_META),
+        0xffe8 => Some(usage::RIGHT_META),
+        0xffed => Some(usage::LEFT_META),
+        0xffee => Some(usage::RIGHT_META),
         0xffbe..=0xffc5 => Some(usage::F1 + (keysym - 0xffbe)),
         _ => None,
     }
