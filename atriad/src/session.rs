@@ -70,6 +70,24 @@ impl Session {
         self.connection
     }
 
+    /// The memory this client has handed over, for a caller about to read pixels out of it.
+    #[must_use]
+    pub const fn memory(&self) -> &SharedMemoryStore {
+        &self.memory
+    }
+
+    /// Write out whatever the compositor has queued for this client, outside serving a request.
+    ///
+    /// Presentation produces events — a buffer release above all — and they are decided between
+    /// requests rather than during one.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionError::Closed`] when the client has gone.
+    pub fn deliver(&mut self, state: &mut CompositorState) -> Result<(usize, usize), SessionError> {
+        self.flush(state)
+    }
+
     /// How much shared memory this client has handed over and the compositor still holds.
     #[must_use]
     pub fn adopted_memory(&self) -> usize {

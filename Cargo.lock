@@ -63,6 +63,7 @@ version = "0.1.0"
 dependencies = [
  "atria-compositor",
  "atria-protocol",
+ "atria-software-output",
  "atria-transport",
  "libc",
 ]

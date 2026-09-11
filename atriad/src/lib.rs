@@ -8,8 +8,10 @@
 //! clients drawing at once, one of them dying without disturbing the other — are properties of
 //! this loop, and a test can drive it over a socket pair without spawning anything.
 
+mod present;
 mod session;
 
+pub use present::{PresentFailure, Presenter, present_for};
 pub use session::{Served, Session, SessionError};
 
 use atria_compositor::{CompositorState, ConnectionLimits, ServerLimits};

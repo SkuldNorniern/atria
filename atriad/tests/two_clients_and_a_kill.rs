@@ -4,21 +4,26 @@
 //! death is one client's death — that the other keeps drawing, that what the dead one held is
 //! given back, and that the compositor is still able to take a replacement.
 
-use std::os::fd::{FromRawFd, OwnedFd};
+use std::ffi::c_void;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 use atria_compositor::{
-    CompositorState, ConnectionLimits, FORMAT_XRGB8888, ObjectKind, ServerLimits,
+    CompositorState, ConnectionLimits, FORMAT_XRGB8888, ObjectKind, Point, ServerLimits, Size,
+    SurfaceKey,
 };
 use atria_protocol::capability::CapabilitySet;
 use atria_protocol::interface::Operation;
-use atria_protocol::message::{Attach, Commit, CreateBuffer, CreatePool, DamageBuffer, NewId};
-use atria_protocol::message::{EncodePayload, encode_message};
-use atria_protocol::wire::{HandleIndex, HandleKind, MAX_MESSAGE_SIZE};
+use atria_protocol::message::{
+    Attach, Commit, CreateBuffer, CreatePool, DamageBuffer, EncodePayload, NewId, encode_message,
+};
+use atria_protocol::wire::{HandleIndex, HandleKind, Header, MAX_MESSAGE_SIZE};
 use atria_protocol::{ObjectId, Opcode};
+use atria_software_output::{HeadlessSink, PixelLayout};
 use atria_transport::{Transport, UnixTransport};
-use atriad::{Session, SessionError, software_capabilities};
+use atriad::{Presenter, Session, SessionError, present_for, software_capabilities};
 use libc::{
-    AF_UNIX, MFD_CLOEXEC, SOCK_CLOEXEC, SOCK_SEQPACKET, ftruncate, memfd_create, off_t, socketpair,
+    AF_UNIX, MFD_CLOEXEC, SOCK_CLOEXEC, SOCK_SEQPACKET, ftruncate, memfd_create, off_t, pwrite,
+    socketpair,
 };
 
 fn id(raw: u32) -> ObjectId {
@@ -55,6 +60,25 @@ fn memory(bytes: usize) -> OwnedFd {
     handle
 }
 
+/// Put bytes into a client's own shared memory, the way a client draws into it.
+fn write_at(handle: &OwnedFd, offset: u32, bytes: &[u8]) {
+    // SAFETY: `pwrite` reads `bytes`, which is borrowed here, and writes to the borrowed
+    // descriptor without moving its offset.
+    let written = unsafe {
+        pwrite(
+            handle.as_raw_fd(),
+            bytes.as_ptr().cast::<c_void>(),
+            bytes.len(),
+            off_t::from(offset),
+        )
+    };
+    assert_eq!(
+        written,
+        bytes.len() as isize,
+        "the whole region must be written"
+    );
+}
+
 /// A client, as seen from its own side of the socket.
 struct Client {
     transport: UnixTransport,
@@ -83,6 +107,16 @@ impl Client {
         handle: &OwnedFd,
     ) {
         self.send(object, operation, payload, &[handle]);
+    }
+
+    /// Read one event the compositor sent.
+    fn receive_event(&mut self) -> Header {
+        let envelope = self
+            .transport
+            .receive()
+            .unwrap_or_else(|error| panic!("an event must arrive: {error:?}"));
+        Header::decode(envelope.bytes())
+            .unwrap_or_else(|error| panic!("an event must decode: {error:?}"))
     }
 
     fn send(
@@ -290,4 +324,142 @@ fn two_clients_draw_at_once_and_one_dying_does_not_disturb_the_other() {
     let (_replacement_client, replacement_server) = pair();
     let replacement = accept(&mut state, replacement_server);
     assert!(state.is_connected(replacement.connection()));
+}
+
+/// The chain closes: a client's pixels reach a composed frame, and the release that lets it draw
+/// again comes back over the socket.
+///
+/// Until the release arrives a client cannot touch that memory, so this is what makes a second
+/// frame possible rather than a nicety.
+#[test]
+fn a_clients_pixels_reach_a_frame_and_its_buffer_comes_back() {
+    let mut state = CompositorState::new(
+        software_capabilities(),
+        ServerLimits::default(),
+        ConnectionLimits::default(),
+    );
+    let (socket, server) = pair();
+    let mut session = accept(&mut state, server);
+    let mut client = Client::new(socket);
+
+    let region = memory(4096);
+    // A recognisable colour, so the frame proves the client's own bytes arrived rather than any
+    // bytes at all.
+    let colour = [0x20_u8, 0x60, 0xc0, 0xff];
+    let pixels: Vec<u8> = colour.iter().copied().cycle().take(16 * 16 * 4).collect();
+    write_at(&region, 0, &pixels);
+
+    client.request_with_handle(
+        id(10),
+        Operation::ShmCreatePool,
+        &CreatePool {
+            new_id: id(256),
+            memory: HandleIndex::new(0, HandleKind::SharedMemory),
+            size: 4096,
+        },
+        &region,
+    );
+    session
+        .serve_one(&mut state)
+        .unwrap_or_else(|error| panic!("the pool is adopted: {error:?}"));
+
+    client.request(
+        id(256),
+        Operation::ShmPoolCreateBuffer,
+        &CreateBuffer {
+            new_id: id(257),
+            offset: 0,
+            width: 16,
+            height: 16,
+            stride: 64,
+            format: FORMAT_XRGB8888,
+        },
+    );
+    session
+        .serve_one(&mut state)
+        .unwrap_or_else(|error| panic!("the buffer is carved: {error:?}"));
+
+    client.request(
+        id(11),
+        Operation::CompositorCreateSurface,
+        &NewId { new_id: id(258) },
+    );
+    session
+        .serve_one(&mut state)
+        .unwrap_or_else(|error| panic!("the surface is created: {error:?}"));
+    // With no shell attached there is nobody to place it, so the fallback puts it at the origin.
+    state
+        .place_surface(
+            SurfaceKey {
+                connection: session.connection(),
+                object_id: id(258),
+            },
+            Point { x: 0, y: 0 },
+        )
+        .unwrap_or_else(|error| panic!("the fallback placement applies: {error:?}"));
+
+    client.request(
+        id(258),
+        Operation::SurfaceAttach,
+        &Attach {
+            buffer: id(257),
+            x_offset: 0,
+            y_offset: 0,
+        },
+    );
+    session
+        .serve_one(&mut state)
+        .unwrap_or_else(|error| panic!("the buffer is attached: {error:?}"));
+    client.request(
+        id(258),
+        Operation::SurfaceCommit,
+        &Commit {
+            commit_id: 1,
+            configure_serial: 0,
+        },
+    );
+    session
+        .serve_one(&mut state)
+        .unwrap_or_else(|error| panic!("the frame is committed: {error:?}"));
+
+    let mut presenter = Presenter::new(
+        Size {
+            width: 64,
+            height: 64,
+        },
+        PixelLayout::new(4).unwrap_or_else(|error| panic!("four bytes a pixel: {error:?}")),
+    )
+    .unwrap_or_else(|error| panic!("the output is usable: {error:?}"));
+    let mut sink = HeadlessSink::default();
+
+    let report = present_for(
+        &mut presenter,
+        &mut state,
+        &mut session,
+        id(257),
+        1_000,
+        &mut sink,
+    )
+    .unwrap_or_else(|error| panic!("the frame presents: {error:?}"));
+    assert_eq!(
+        report.surfaces_composited, 1,
+        "the client's surface is in the frame"
+    );
+
+    // The top-left pixel of the frame is the client's colour, because that is where its surface
+    // was placed and those are the bytes it wrote.
+    assert_eq!(
+        &presenter.frame().bytes()[..4],
+        &colour,
+        "the composed frame holds the client's own pixels"
+    );
+
+    // And the release travelled back, which is what lets the client draw again.
+    let released = client.receive_event();
+    assert_eq!(
+        released.opcode.into_raw(),
+        Operation::BufferRelease.opcode(),
+        "the client is told its buffer is free"
+    );
+    assert_eq!(released.object_id, id(257));
 }

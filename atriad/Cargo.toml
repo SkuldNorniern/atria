@@ -9,6 +9,7 @@ description = "The Atria display server"
 [dependencies]
 atria-compositor = { path = "../atria-compositor" }
 atria-protocol = { path = "../atria-protocol" }
+atria-software-output = { path = "../atria-software-output" }
 atria-transport = { path = "../atria-transport" }
 libc = "0.2"
 
