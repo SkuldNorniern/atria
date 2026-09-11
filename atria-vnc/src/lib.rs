@@ -7,7 +7,8 @@
 //! client at a time. Compression and incremental updates are optimisations, and an optimisation in
 //! the thing you check your work with is a place for a bug to hide.
 
-mod protocol;
+pub mod protocol;
 mod server;
 
+pub use protocol::PixelFormat;
 pub use server::{PointerInput, VncError, VncSink};

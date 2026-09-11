@@ -12,8 +12,8 @@ use std::time::Duration;
 use atria_software_output::{Frame, FrameReport, FrameSink, SinkError};
 
 use crate::protocol::{
-    SECURITY_NONE, VERSION, client_message, client_message_length, pixel_format, read_exact,
-    write_full_update,
+    PixelFormat, SECURITY_NONE, VERSION, client_message, client_message_length, pixel_format,
+    read_exact, write_full_update,
 };
 
 /// Why the framebuffer could not be served.
@@ -163,18 +163,21 @@ impl Viewer {
             let Ok((mut stream, _)) = self.listener.accept() else {
                 return;
             };
-            if self.handshake(&mut stream).is_err() {
+            if let Err(error) = self.handshake(&mut stream) {
+                eprintln!("atria-vnc: a viewer could not be served: {error}");
                 continue;
             }
             // A viewer that connects after the last composition still sees it. The output has a
             // current state whether or not anything changed while somebody was watching.
             let mut shown = 0;
             let mut asked = false;
+            let mut format = PixelFormat::declared();
             loop {
                 // Read first, always. This is where a viewer's input arrives and where its
                 // departure is noticed, and a server that only read before writing would stop
                 // hearing from a viewer that had stopped asking for frames.
-                if self.drain_requests(&mut stream, &mut asked).is_err() {
+                if let Err(error) = self.drain_requests(&mut stream, &mut asked, &mut format) {
+                    report(&error);
                     break;
                 }
                 // Sent only when asked for. RFB puts the client in charge of when a frame
@@ -184,7 +187,10 @@ impl Viewer {
                 if asked && let Some(frame) = self.frame_after(shown) {
                     shown = frame.0;
                     asked = false;
-                    if write_full_update(&mut stream, self.size.0, self.size.1, &frame.1).is_err() {
+                    if let Err(error) =
+                        write_full_update(&mut stream, self.size.0, self.size.1, &frame.1, format)
+                    {
+                        report(&error);
                         break;
                     }
                 }
@@ -276,9 +282,14 @@ impl Viewer {
     /// Every message is read whole even when it changes nothing. Skipping one by its number
     /// without consuming its body leaves the next read starting mid-message, and everything after
     /// that is misread — a failure that looks like a corrupt frame rather than a parsing bug.
-    fn drain_requests(&self, stream: &mut TcpStream, asked: &mut bool) -> io::Result<()> {
+    fn drain_requests(
+        &self,
+        stream: &mut TcpStream,
+        asked: &mut bool,
+        format: &mut PixelFormat,
+    ) -> io::Result<()> {
         stream.set_nonblocking(true)?;
-        let outcome = self.drain(stream, asked);
+        let outcome = self.drain(stream, asked, format);
         stream.set_nonblocking(false)?;
         outcome
     }
@@ -300,7 +311,12 @@ impl Viewer {
         held.push(PointerInput { x, y, buttons });
     }
 
-    fn drain(&self, stream: &mut TcpStream, asked: &mut bool) -> io::Result<()> {
+    fn drain(
+        &self,
+        stream: &mut TcpStream,
+        asked: &mut bool,
+        format: &mut PixelFormat,
+    ) -> io::Result<()> {
         loop {
             let mut number = [0_u8; 1];
             match stream.read(&mut number) {
@@ -316,18 +332,29 @@ impl Viewer {
             if number[0] == client_message::FRAMEBUFFER_UPDATE_REQUEST {
                 *asked = true;
             }
-            let result = self.consume_body(stream, number[0]);
+            let result = self.consume_body(stream, number[0], format);
             stream.set_nonblocking(true)?;
             result?;
         }
     }
 
-    fn consume_body(&self, stream: &mut TcpStream, number: u8) -> io::Result<()> {
+    fn consume_body(
+        &self,
+        stream: &mut TcpStream,
+        number: u8,
+        format: &mut PixelFormat,
+    ) -> io::Result<()> {
         if let Some(length) = client_message_length(number) {
             let mut body = vec![0_u8; length];
             stream.read_exact(&mut body)?;
             if number == client_message::POINTER_EVENT {
                 self.record_pointer(&body);
+            }
+            if number == client_message::SET_PIXEL_FORMAT {
+                // Three bytes of padding, then the sixteen the format occupies.
+                let mut declared = [0_u8; 16];
+                declared.copy_from_slice(&body[3..19]);
+                *format = PixelFormat::decode(&declared)?;
             }
             return Ok(());
         }
@@ -346,11 +373,29 @@ impl Viewer {
                 let mut body = vec![0_u8; length];
                 stream.read_exact(&mut body)
             }
-            // An unknown message number cannot be skipped, because its length is unknown. The
-            // connection is the only thing that can be resynchronised.
-            _ => Err(io::Error::from(ErrorKind::InvalidData)),
+            // An unknown message number cannot be skipped, because its length is unknown, so the
+            // connection is the only thing that can be resynchronised. Named rather than silent:
+            // a viewer dropped for speaking something this server does not know looks exactly
+            // like a viewer showing a black screen for no reason.
+            _ => Err(io::Error::new(
+                ErrorKind::InvalidData,
+                alloc_message(number),
+            )),
         }
     }
+}
+
+/// Say why a viewer was dropped. Losing one silently is indistinguishable from a blank screen.
+fn report(error: &io::Error) {
+    if error.kind() == ErrorKind::UnexpectedEof || error.kind() == ErrorKind::ConnectionReset {
+        return;
+    }
+    eprintln!("atria-vnc: the viewer was dropped: {error}");
+}
+
+/// Name an unrecognised client message, so a log says which one arrived.
+fn alloc_message(number: u8) -> String {
+    format!("the viewer sent message type {number}, which this server does not speak")
 }
 
 impl FrameSink for VncSink {
