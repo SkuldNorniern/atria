@@ -194,6 +194,8 @@ pub const fn usage_of_keysym(keysym: u32) -> Option<u32> {
         0xffe8 => Some(usage::RIGHT_META),
         0xffed => Some(usage::LEFT_META),
         0xffee => Some(usage::RIGHT_META),
+        // AltGr is the right alt key, whatever the keymap makes it produce.
+        0xfe03 => Some(usage::RIGHT_ALT),
         0xffbe..=0xffc5 => Some(usage::F1 + (keysym - 0xffbe)),
         _ => None,
     }

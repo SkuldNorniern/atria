@@ -48,6 +48,8 @@ fn the_named_keys_and_modifiers_are_known() {
         assert_eq!(usage_of_keysym(right), Some(usage::RIGHT_META));
     }
     assert_eq!(usage_of_keysym(0xffbe), Some(usage::F1));
+    // AltGr is a name for where the right alt key is, not for what it produces.
+    assert_eq!(usage_of_keysym(0xfe03), Some(usage::RIGHT_ALT));
 }
 
 #[test]
