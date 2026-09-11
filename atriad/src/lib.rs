@@ -27,7 +27,15 @@ pub fn software_capabilities() -> CapabilitySet {
 }
 
 /// Build a compositor with the bounds a server runs under.
+///
+/// The server supports shell control because it implements it. Whether any particular connection
+/// may hold it is decided when that connection is admitted. The one set still mixes backend
+/// support with authority, which is a split the capability model has yet to make.
 #[must_use]
 pub fn compositor(server: ServerLimits, connection: ConnectionLimits) -> CompositorState {
-    CompositorState::new(software_capabilities(), server, connection)
+    CompositorState::new(
+        software_capabilities().with(Capability::ShellControl),
+        server,
+        connection,
+    )
 }

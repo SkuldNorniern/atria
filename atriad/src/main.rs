@@ -23,7 +23,7 @@ use atria_compositor::{
     OutputInfo, Point, ServerLimits, Size, StateError,
 };
 use atria_protocol::ObjectId;
-use atria_protocol::capability::CapabilitySet;
+use atria_protocol::capability::{Capability, CapabilitySet};
 use atria_software_output::PixelLayout;
 use atria_transport::UnixTransport;
 use atria_vnc::VncSink;
@@ -62,10 +62,13 @@ fn main() -> ExitCode {
 
 fn run() -> io::Result<()> {
     let path = args().nth(1).unwrap_or_else(|| {
-        eprintln!("atriad: usage: atriad <socket-path> [--vnc <address>]");
+        eprintln!("atriad: usage: atriad <socket-path> [--vnc <address>] [--shell <socket-path>]");
         exit(2);
     });
     let watching = args().skip_while(|argument| argument != "--vnc").nth(1);
+    // A second socket, for the shell. Authority comes from which socket a program could open,
+    // which the filesystem enforces — rather than from anything a client says about itself.
+    let shell_path = args().skip_while(|argument| argument != "--shell").nth(1);
 
     let listener = listen(&path)?;
     println!("atriad: listening on {path}");
@@ -137,6 +140,15 @@ fn run() -> io::Result<()> {
     state.place_output(identity, Point { x: 0, y: 0 });
     println!("atriad: one output, {OUTPUT_WIDTH}x{OUTPUT_HEIGHT}");
 
+    let shell_listener = match shell_path.as_deref() {
+        Some(path) => {
+            let listener = listen(path)?;
+            println!("atriad: a shell may connect to {path}");
+            Some(listener)
+        }
+        None => None,
+    };
+
     let mut sessions: Vec<Session<UnixTransport>> = Vec::new();
     let mut composed = 0_u64;
 
@@ -147,9 +159,16 @@ fn run() -> io::Result<()> {
         // How many sessions this wait covers. A client admitted below joins the next wait, and
         // reading its slot out of an array built before it existed is how that goes wrong.
         let polled = sessions.len();
-        let mut watched = Vec::with_capacity(polled + 1);
+        let mut watched = Vec::with_capacity(polled + 2);
         watched.push(pollfd {
             fd: listener.as_raw_fd(),
+            events: POLLIN,
+            revents: 0,
+        });
+        watched.push(pollfd {
+            fd: shell_listener
+                .as_ref()
+                .map_or(-1, |listener| listener.as_raw_fd()),
             events: POLLIN,
             revents: 0,
         });
@@ -173,7 +192,7 @@ fn run() -> io::Result<()> {
         }
 
         if watched[0].revents & POLLIN != 0 {
-            match admit(&listener, &mut state) {
+            match admit(&listener, &mut state, false) {
                 Ok(session) => {
                     println!(
                         "atriad: a client connected, {} now served",
@@ -185,10 +204,22 @@ fn run() -> io::Result<()> {
             }
         }
 
+        if watched[1].revents & POLLIN != 0
+            && let Some(listener) = shell_listener.as_ref()
+        {
+            match admit(listener, &mut state, true) {
+                Ok(session) => {
+                    println!("atriad: a shell connected");
+                    sessions.push(session);
+                }
+                Err(error) => eprintln!("atriad: could not admit a shell: {error}"),
+            }
+        }
+
         let mut dispatched = false;
         let mut departed = Vec::new();
         for (index, session) in sessions.iter_mut().enumerate().take(polled) {
-            if watched[index + 1].revents & (POLLIN | POLLHUP | POLLERR) == 0 {
+            if watched[index + 2].revents & (POLLIN | POLLHUP | POLLERR) == 0 {
                 continue;
             }
             match session.serve_one(&mut state) {
@@ -232,11 +263,30 @@ fn run() -> io::Result<()> {
 }
 
 /// Accept one connection and take it as far as a session the compositor has admitted.
-fn admit(listener: &OwnedFd, state: &mut CompositorState) -> io::Result<Session<UnixTransport>> {
+fn admit(
+    listener: &OwnedFd,
+    state: &mut CompositorState,
+    shell: bool,
+) -> io::Result<Session<UnixTransport>> {
     let socket = accept(listener)?;
+    // What a connection may ever be granted is settled when it is admitted, from which socket it
+    // arrived on. A client from the ordinary socket cannot be granted shell authority later,
+    // whatever it asks for — the refusal is in what it was admitted with, not in a check further
+    // down.
+    let available = if shell {
+        software_capabilities().with(Capability::ShellControl)
+    } else {
+        software_capabilities()
+    };
     let connection = state
-        .connect(software_capabilities(), CapabilitySet::empty())
+        .connect(available, CapabilitySet::empty())
         .map_err(|error| io::Error::other(format!("the connection was refused: {error:?}")))?;
+    if shell && let Err(error) = state.grant_capability(connection, Capability::ShellControl) {
+        state.close_connection(connection);
+        return Err(io::Error::other(format!(
+            "the shell authority could not be granted: {error:?}"
+        )));
+    }
     if let Err(error) = establish_session(state, connection) {
         state.close_connection(connection);
         return Err(io::Error::other(format!(
