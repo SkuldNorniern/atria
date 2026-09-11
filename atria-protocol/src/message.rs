@@ -1009,3 +1009,277 @@ impl EncodePayload for ShellToplevel<'_> {
         encoder.write_string(self.title)
     }
 }
+
+/// The pointer arrived over a surface, at a point inside it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PointerEnter {
+    pub serial: u32,
+    pub surface: ObjectId,
+    pub x: i32,
+    pub y: i32,
+    pub epoch: u32,
+}
+
+impl PointerEnter {
+    /// # Errors
+    ///
+    /// Returns [`DecodeError`] when the payload is not the five fields the table names.
+    pub fn decode(input: &[u8]) -> Result<Self, DecodeError> {
+        let mut decoder = Decoder::new(input);
+        let value = Self {
+            serial: decoder.read_u32()?,
+            surface: ObjectId::from_raw(decoder.read_u32()?),
+            x: decoder.read_i32()?,
+            y: decoder.read_i32()?,
+            epoch: decoder.read_u32()?,
+        };
+        decoder.finish()?;
+        Ok(value)
+    }
+}
+
+impl EncodePayload for PointerEnter {
+    fn encoded_len(&self) -> Result<usize, EncodeError> {
+        Ok(20)
+    }
+
+    fn encode(&self, encoder: &mut Encoder<'_>) -> Result<(), EncodeError> {
+        encoder.write_u32(self.serial)?;
+        encoder.write_u32(self.surface.into_raw())?;
+        encoder.write_i32(self.x)?;
+        encoder.write_i32(self.y)?;
+        encoder.write_u32(self.epoch)
+    }
+}
+
+/// The pointer is no longer over a surface.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PointerLeave {
+    pub serial: u32,
+    pub surface: ObjectId,
+    pub epoch: u32,
+}
+
+impl PointerLeave {
+    /// # Errors
+    ///
+    /// Returns [`DecodeError`] when the payload is not a serial, a surface and an epoch.
+    pub fn decode(input: &[u8]) -> Result<Self, DecodeError> {
+        let mut decoder = Decoder::new(input);
+        let value = Self {
+            serial: decoder.read_u32()?,
+            surface: ObjectId::from_raw(decoder.read_u32()?),
+            epoch: decoder.read_u32()?,
+        };
+        decoder.finish()?;
+        Ok(value)
+    }
+}
+
+impl EncodePayload for PointerLeave {
+    fn encoded_len(&self) -> Result<usize, EncodeError> {
+        Ok(12)
+    }
+
+    fn encode(&self, encoder: &mut Encoder<'_>) -> Result<(), EncodeError> {
+        encoder.write_u32(self.serial)?;
+        encoder.write_u32(self.surface.into_raw())?;
+        encoder.write_u32(self.epoch)
+    }
+}
+
+/// The pointer moved to a point inside the surface it is over.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PointerMotion {
+    pub time_ns: u64,
+    pub x: i32,
+    pub y: i32,
+    pub epoch: u32,
+}
+
+impl PointerMotion {
+    /// # Errors
+    ///
+    /// Returns [`DecodeError`] when the payload is not a time, a point and an epoch.
+    pub fn decode(input: &[u8]) -> Result<Self, DecodeError> {
+        let mut decoder = Decoder::new(input);
+        let time_ns = read_u64(&mut decoder)?;
+        let value = Self {
+            time_ns,
+            x: decoder.read_i32()?,
+            y: decoder.read_i32()?,
+            epoch: decoder.read_u32()?,
+        };
+        decoder.finish()?;
+        Ok(value)
+    }
+}
+
+impl EncodePayload for PointerMotion {
+    fn encoded_len(&self) -> Result<usize, EncodeError> {
+        Ok(20)
+    }
+
+    fn encode(&self, encoder: &mut Encoder<'_>) -> Result<(), EncodeError> {
+        write_u64(encoder, self.time_ns)?;
+        encoder.write_i32(self.x)?;
+        encoder.write_i32(self.y)?;
+        encoder.write_u32(self.epoch)
+    }
+}
+
+/// A pointer button changed state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PointerButton {
+    pub serial: u32,
+    pub time_ns: u64,
+    pub button: u32,
+    pub state: u32,
+    pub epoch: u32,
+}
+
+impl PointerButton {
+    /// # Errors
+    ///
+    /// Returns [`DecodeError`] when the payload is not the five fields the table names.
+    pub fn decode(input: &[u8]) -> Result<Self, DecodeError> {
+        let mut decoder = Decoder::new(input);
+        let serial = decoder.read_u32()?;
+        let time_ns = read_u64(&mut decoder)?;
+        let value = Self {
+            serial,
+            time_ns,
+            button: decoder.read_u32()?,
+            state: decoder.read_u32()?,
+            epoch: decoder.read_u32()?,
+        };
+        decoder.finish()?;
+        Ok(value)
+    }
+}
+
+impl EncodePayload for PointerButton {
+    fn encoded_len(&self) -> Result<usize, EncodeError> {
+        Ok(24)
+    }
+
+    fn encode(&self, encoder: &mut Encoder<'_>) -> Result<(), EncodeError> {
+        encoder.write_u32(self.serial)?;
+        write_u64(encoder, self.time_ns)?;
+        encoder.write_u32(self.button)?;
+        encoder.write_u32(self.state)?;
+        encoder.write_u32(self.epoch)
+    }
+}
+
+/// A scroll or other continuous axis moved.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PointerAxis {
+    pub time_ns: u64,
+    pub axis: u32,
+    pub value: i32,
+    pub epoch: u32,
+}
+
+impl PointerAxis {
+    /// # Errors
+    ///
+    /// Returns [`DecodeError`] when the payload is not a time, an axis, a value and an epoch.
+    pub fn decode(input: &[u8]) -> Result<Self, DecodeError> {
+        let mut decoder = Decoder::new(input);
+        let time_ns = read_u64(&mut decoder)?;
+        let value = Self {
+            time_ns,
+            axis: decoder.read_u32()?,
+            value: decoder.read_i32()?,
+            epoch: decoder.read_u32()?,
+        };
+        decoder.finish()?;
+        Ok(value)
+    }
+}
+
+impl EncodePayload for PointerAxis {
+    fn encoded_len(&self) -> Result<usize, EncodeError> {
+        Ok(20)
+    }
+
+    fn encode(&self, encoder: &mut Encoder<'_>) -> Result<(), EncodeError> {
+        write_u64(encoder, self.time_ns)?;
+        encoder.write_u32(self.axis)?;
+        encoder.write_i32(self.value)?;
+        encoder.write_u32(self.epoch)
+    }
+}
+
+/// What a person did to a window, as a shell is told about it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ShellInteraction {
+    pub seat: u64,
+    pub handle: u64,
+    pub serial: u32,
+    pub kind: u32,
+}
+
+impl ShellInteraction {
+    /// # Errors
+    ///
+    /// Returns [`DecodeError`] when the payload is not the four fields the table names.
+    pub fn decode(input: &[u8]) -> Result<Self, DecodeError> {
+        let mut decoder = Decoder::new(input);
+        let seat = read_u64(&mut decoder)?;
+        let handle = read_u64(&mut decoder)?;
+        let value = Self {
+            seat,
+            handle,
+            serial: decoder.read_u32()?,
+            kind: decoder.read_u32()?,
+        };
+        decoder.finish()?;
+        Ok(value)
+    }
+}
+
+impl EncodePayload for ShellInteraction {
+    fn encoded_len(&self) -> Result<usize, EncodeError> {
+        Ok(24)
+    }
+
+    fn encode(&self, encoder: &mut Encoder<'_>) -> Result<(), EncodeError> {
+        write_u64(encoder, self.seat)?;
+        write_u64(encoder, self.handle)?;
+        encoder.write_u32(self.serial)?;
+        encoder.write_u32(self.kind)
+    }
+}
+
+/// A seat and the window a shell is talking about on it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SeatHandle {
+    pub seat: u64,
+    pub handle: u64,
+}
+
+impl SeatHandle {
+    /// # Errors
+    ///
+    /// Returns [`DecodeError`] when the payload is not a seat and a handle.
+    pub fn decode(input: &[u8]) -> Result<Self, DecodeError> {
+        let mut decoder = Decoder::new(input);
+        let seat = read_u64(&mut decoder)?;
+        let handle = read_u64(&mut decoder)?;
+        decoder.finish()?;
+        Ok(Self { seat, handle })
+    }
+}
+
+impl EncodePayload for SeatHandle {
+    fn encoded_len(&self) -> Result<usize, EncodeError> {
+        Ok(16)
+    }
+
+    fn encode(&self, encoder: &mut Encoder<'_>) -> Result<(), EncodeError> {
+        write_u64(encoder, self.seat)?;
+        write_u64(encoder, self.handle)
+    }
+}

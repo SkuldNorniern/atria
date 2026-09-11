@@ -56,6 +56,11 @@ pub enum Interface {
     /// application uses. Two interfaces because they are two powers: an application gives its own
     /// surface window semantics, a shell arranges everyone's.
     ShellControl,
+    /// A coherent input and routing domain. Not "the mouse and keyboard": a workstation with two
+    /// people at it has two seats, and so does a television with a remote and a gamepad.
+    Seat,
+    /// One seat's pointing device, as the client it is over sees it.
+    Pointer,
 }
 
 /// Whether an operation travels from the client or to it.
@@ -149,6 +154,14 @@ pub enum Operation {
     ShellControlToplevelGone,
     ShellControlFocusChanged,
     ShellControlSnapshotDone,
+    ShellControlInteraction,
+    SeatGetPointer,
+    PointerDestroy,
+    PointerEnter,
+    PointerLeave,
+    PointerMotion,
+    PointerButton,
+    PointerAxis,
 }
 
 /// Shorthand for one table row.
@@ -255,7 +268,7 @@ impl Operation {
             ),
             Self::ShellControlPlace => spec(I::ShellControl, Method, 1, "place", &[U64, I32, I32]),
             Self::ShellControlRaise => spec(I::ShellControl, Method, 2, "raise", &[U64]),
-            Self::ShellControlFocus => spec(I::ShellControl, Method, 3, "focus", &[U64]),
+            Self::ShellControlFocus => spec(I::ShellControl, Method, 3, "focus", &[U64, U64]),
             Self::ShellControlClose => spec(I::ShellControl, Method, 4, "close", &[U64]),
             // One event for a window the shell is being told about, whether it existed before the
             // shell attached or appeared after. The snapshot boundary is what separates those, so
@@ -266,10 +279,34 @@ impl Operation {
             Self::ShellControlToplevelGone => {
                 spec(I::ShellControl, Event, 1, "toplevel_gone", &[U64])
             }
+            // Focus is a seat's, not the system's. Two people at one machine hold two focuses,
+            // and a model with one would have to be replaced rather than extended.
             Self::ShellControlFocusChanged => {
-                spec(I::ShellControl, Event, 2, "focus_changed", &[U64])
+                spec(I::ShellControl, Event, 2, "focus_changed", &[U64, U64])
             }
             Self::ShellControlSnapshotDone => spec(I::ShellControl, Event, 3, "snapshot_done", &[]),
+            // What the person did, not what they typed. A shell implementing click-to-focus needs
+            // to know a window was pressed; it does not need to see the characters going into it.
+            Self::ShellControlInteraction => spec(
+                I::ShellControl,
+                Event,
+                4,
+                "interaction",
+                &[U64, U64, U32, U32],
+            ),
+            Self::SeatGetPointer => spec(I::Seat, Method, 0, "get_pointer", &[Object]),
+            Self::PointerDestroy => spec(I::Pointer, Method, 0, "destroy", &[]),
+            // Every pointer event carries the epoch its routing belonged to. When continuity
+            // breaks — a device leaves, a grab is cancelled, routing is rebuilt — the epoch
+            // advances, and a client can tell a stale event from a current one rather than
+            // treating an old release as the state of the world.
+            Self::PointerEnter => {
+                spec(I::Pointer, Event, 0, "enter", &[U32, Object, I32, I32, U32])
+            }
+            Self::PointerLeave => spec(I::Pointer, Event, 1, "leave", &[U32, Object, U32]),
+            Self::PointerMotion => spec(I::Pointer, Event, 2, "motion", &[U64, I32, I32, U32]),
+            Self::PointerButton => spec(I::Pointer, Event, 3, "button", &[U32, U64, U32, U32, U32]),
+            Self::PointerAxis => spec(I::Pointer, Event, 4, "axis", &[U64, U32, I32, U32]),
         }
     }
 
@@ -305,6 +342,8 @@ impl Interface {
             Self::Toplevel => "atria_toplevel",
             Self::Output => "atria_output",
             Self::ShellControl => "atria_shell_control",
+            Self::Seat => "atria_seat",
+            Self::Pointer => "atria_pointer",
         }
     }
 
@@ -334,6 +373,8 @@ impl Interface {
                 O::ToplevelSetMaxSize,
             ],
             Self::Output => &[],
+            Self::Seat => &[O::SeatGetPointer],
+            Self::Pointer => &[O::PointerDestroy],
             Self::ShellControl => &[
                 O::ShellControlConfigure,
                 O::ShellControlPlace,
@@ -356,6 +397,14 @@ impl Interface {
             Self::Buffer => &[O::BufferRelease],
             Self::Surface => &[O::SurfaceEnter, O::SurfaceLeave, O::SurfaceFrameDone],
             Self::Toplevel => &[O::ToplevelConfigure, O::ToplevelClose],
+            Self::Seat => &[],
+            Self::Pointer => &[
+                O::PointerEnter,
+                O::PointerLeave,
+                O::PointerMotion,
+                O::PointerButton,
+                O::PointerAxis,
+            ],
             Self::ShellControl => &[
                 O::ShellControlToplevel,
                 O::ShellControlToplevelGone,
@@ -408,6 +457,8 @@ pub const INTERFACES: &[Interface] = &[
     Interface::Toplevel,
     Interface::Output,
     Interface::ShellControl,
+    Interface::Seat,
+    Interface::Pointer,
 ];
 
 /// The states a toplevel may be told it is in.

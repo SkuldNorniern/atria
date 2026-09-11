@@ -158,6 +158,11 @@ fn the_documented_sizes_are_the_computed_sizes() {
         (Operation::OutputMode, 0x18),
         (Operation::OutputScale, 0x14),
         (Operation::OutputDone, 0x0c),
+        (Operation::PointerEnter, 0x20),
+        (Operation::PointerLeave, 0x18),
+        (Operation::PointerMotion, 0x20),
+        (Operation::PointerButton, 0x24),
+        (Operation::PointerAxis, 0x20),
     ];
 
     for (operation, size) in documented {
@@ -196,8 +201,8 @@ fn only_the_string_carrying_messages_are_variable_length() {
 
 /// Every interface the draw path names is in the table exactly once.
 #[test]
-fn the_table_holds_eleven_interfaces() {
-    assert_eq!(INTERFACES.len(), 11);
+fn the_table_holds_thirteen_interfaces() {
+    assert_eq!(INTERFACES.len(), 13);
     for (index, interface) in INTERFACES.iter().enumerate() {
         for other in &INTERFACES[index + 1..] {
             assert_ne!(interface.name(), other.name(), "duplicate interface name");
