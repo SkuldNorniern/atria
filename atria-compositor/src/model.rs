@@ -18,6 +18,46 @@ use crate::shell::ToplevelHandle;
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SeatId(pub u64);
 
+/// A key and the modifiers that must be held with it.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct Chord {
+    pub trigger: PhysicalKey,
+    pub modifiers: u32,
+    pub mode: ChordMatch,
+}
+
+/// How strictly a chord's modifiers must match what is held.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum ChordMatch {
+    /// Exactly these modifiers, and no others. `Super+Q` does not fire under `Super+Shift+Q`.
+    Exact,
+    /// At least these. Useful for a chord that should survive an extra modifier.
+    AtLeast,
+}
+
+impl ChordMatch {
+    /// The wire's number for this mode, or nothing for a number it does not define.
+    #[must_use]
+    pub const fn from_raw(raw: u32) -> Option<Self> {
+        match raw {
+            0 => Some(Self::Exact),
+            1 => Some(Self::AtLeast),
+            _ => None,
+        }
+    }
+}
+
+impl Chord {
+    /// Whether the modifiers held satisfy this chord.
+    #[must_use]
+    pub const fn accepts(&self, held: Modifiers) -> bool {
+        match self.mode {
+            ChordMatch::Exact => held.0 == self.modifiers,
+            ChordMatch::AtLeast => held.0 & self.modifiers == self.modifiers,
+        }
+    }
+}
+
 /// What a person did to a window.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InteractionKind {
@@ -74,6 +114,8 @@ pub enum ObjectKind {
     Pointer,
     /// One seat's keyboard, as the client holding focus sees it.
     Keyboard,
+    /// A holder's claim on key chords.
+    Shortcuts,
     /// A display, bound from the registry. One global per display, because a client learns which
     /// displays exist the same way it learns everything else exists.
     Output,
@@ -348,6 +390,17 @@ pub enum ClientRequest {
         seat: ObjectId,
         new_id: ObjectId,
     },
+    /// Claim a chord. The holder is told when it fires and nothing else.
+    RegisterShortcut {
+        manager: ObjectId,
+        shortcut: u32,
+        seat: SeatId,
+        chord: Chord,
+    },
+    UnregisterShortcut {
+        manager: ObjectId,
+        shortcut: u32,
+    },
     /// Give a surface window semantics. A surface may take one role.
     GetToplevel {
         surface: ObjectId,
@@ -467,6 +520,14 @@ pub enum EventKind {
     /// Which modifiers are held.
     KeyModifiers {
         modifiers: Modifiers,
+        epoch: u32,
+    },
+    /// A claimed chord fired.
+    ShortcutTriggered {
+        shortcut: u32,
+        seat: SeatId,
+        serial: u32,
+        time_ns: u64,
         epoch: u32,
     },
     /// The pointer came over this surface, at a point inside it.

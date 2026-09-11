@@ -12,10 +12,10 @@ use crate::error::{SceneFault, StateError};
 use atria_protocol::interface::toplevel_state;
 
 use crate::model::{
-    BufferDescriptor, BufferState, BufferTransport, ClientRequest, CommitId, ConnectionId, Damage,
-    Event, EventKind, FocusEvent, InteractionKind, ObjectKind, Point, Rect, SeatCapabilities,
-    SeatId, SeatSnapshot, SessionSnapshot, Size, SurfaceKey, SurfaceRole, SurfaceSnapshot,
-    TitleText, pixel_format_is_known,
+    BufferDescriptor, BufferState, BufferTransport, Chord, ClientRequest, CommitId, ConnectionId,
+    Damage, Event, EventKind, FocusEvent, InteractionKind, ObjectKind, Point, Rect,
+    SeatCapabilities, SeatId, SeatSnapshot, SessionSnapshot, Size, SurfaceKey, SurfaceRole,
+    SurfaceSnapshot, TitleText, pixel_format_is_known,
 };
 use atria_protocol::interface::Interface;
 use atria_protocol::key::{Modifiers, PhysicalKey};
@@ -249,6 +249,9 @@ struct Scene {
 /// Keys a keyboard can hold at once. Bounds what a misreporting device can make us remember.
 const MAX_HELD_KEYS: usize = 32;
 
+/// Chords that may be claimed at once, across every holder and seat.
+const MAX_SHORTCUTS: usize = 256;
+
 /// One seat's routing: where its devices point, and which world that belongs to.
 ///
 /// The epoch and serial belong to the seat, not to a device. A break in continuity breaks it for
@@ -263,11 +266,24 @@ struct SeatRouting {
 }
 
 /// Where a seat's keys are.
+///
+/// The held set is physical: every key actually down, whether or not the focused client was told
+/// about it. `consumed` is what a shortcut swallowed, so the matching release is swallowed too —
+/// a press hidden and a release delivered is not a state a client can make sense of.
 #[derive(Clone, Debug, Default)]
 struct KeyboardRouting {
     modifiers: Modifiers,
     /// Keys held, so focus arriving mid-chord can say what is down. Bounded by `MAX_HELD_KEYS`.
     held: BTreeSet<PhysicalKey>,
+    consumed: BTreeSet<PhysicalKey>,
+}
+
+/// A chord somebody has claimed.
+#[derive(Clone, Copy, Debug)]
+struct ShortcutClaim {
+    holder: ConnectionId,
+    manager: ObjectId,
+    shortcut: u32,
 }
 
 /// Where a seat's pointer is and what holds it.
@@ -307,6 +323,8 @@ pub struct CompositorState {
     next_global: u32,
     outputs: OutputSet,
     seat: SeatRouting,
+    /// Claimed chords, one holder each. Bounded by `MAX_SHORTCUTS`.
+    shortcuts: BTreeMap<(SeatId, Chord), ShortcutClaim>,
     next_configure: u32,
     /// Windows by the handle a shell names them with. Compositor-wide, so it outlives any one
     /// connection — including a shell's.
@@ -338,6 +356,7 @@ impl CompositorState {
             next_global: 1,
             outputs: OutputSet::new(),
             seat: SeatRouting::default(),
+            shortcuts: BTreeMap::new(),
             next_configure: 1,
             toplevels: BTreeMap::new(),
             next_handle: 1,
@@ -569,6 +588,18 @@ impl CompositorState {
             ClientRequest::GetPointer { seat, new_id } => {
                 self.expect_kind(connection, seat, ObjectKind::Seat)?;
                 self.allocate_client(connection, new_id, ObjectKind::Pointer, Object::Global)
+            }
+            ClientRequest::RegisterShortcut {
+                manager,
+                shortcut,
+                seat,
+                chord,
+            } => self.register_shortcut(connection, manager, shortcut, seat, chord),
+            ClientRequest::UnregisterShortcut { manager, shortcut } => {
+                self.expect_kind(connection, manager, ObjectKind::Shortcuts)?;
+                self.shortcuts
+                    .retain(|_, claim| !(claim.holder == connection && claim.shortcut == shortcut));
+                Ok(())
             }
             ClientRequest::GetKeyboard { seat, new_id } => {
                 self.expect_kind(connection, seat, ObjectKind::Seat)?;
@@ -1688,6 +1719,16 @@ impl CompositorState {
                 capability: Capability::ShellControl,
             });
         }
+        if global.kind == ObjectKind::Shortcuts
+            && !self
+                .capabilities(connection)
+                .is_some_and(|held| held.contains(Capability::ShortcutControl))
+        {
+            return Err(StateError::UnsupportedCapability {
+                object_id: new_id,
+                capability: Capability::ShortcutControl,
+            });
+        }
         self.allocate_client(connection, new_id, global.kind, Object::Global)?;
         // A bound display describes itself immediately. A client that had to ask would have a
         // window on an output whose size it does not yet know.
@@ -1847,6 +1888,7 @@ impl CompositorState {
         self.seat.pointer.buttons_held = 0;
         // Keys held in the old world are not held in the new one.
         self.seat.keyboard.held.clear();
+        self.seat.keyboard.consumed.clear();
         self.seat.keyboard.modifiers = Modifiers::default();
         self.seat.epoch = self.seat.epoch.wrapping_add(1);
     }
@@ -1987,6 +2029,32 @@ impl CompositorState {
             };
         }
 
+        // Matched before anything is routed. A chord the shell claimed must not also reach the
+        // application: a window that saw the Q of Super+Q would act on a key nobody meant for it.
+        if pressed && let Some(claim) = self.claimed(key) {
+            self.seat.keyboard.consumed.insert(key);
+            self.seat.serial = self.seat.serial.wrapping_add(1);
+            let serial = self.seat.serial;
+            let epoch = self.seat.epoch;
+            self.push_event(
+                claim.holder,
+                claim.manager,
+                EventKind::ShortcutTriggered {
+                    shortcut: claim.shortcut,
+                    seat: SeatId(1),
+                    serial,
+                    time_ns,
+                    epoch,
+                },
+            );
+            return;
+        }
+        // A press that was swallowed takes its release with it. Half a transition is not a state
+        // a client can make sense of.
+        if !pressed && self.seat.keyboard.consumed.remove(&key) {
+            return;
+        }
+
         let Some(target) = self.keyboard_focus else {
             return;
         };
@@ -2010,6 +2078,48 @@ impl CompositorState {
                 EventKind::KeyModifiers { modifiers, epoch },
             );
         }
+    }
+
+    /// Claim a chord for a holder that may claim chords.
+    ///
+    /// One holder per chord per seat. Last-registration-wins would let anything that bound the
+    /// manager silently take a chord out from under the shell, so a second claim is refused and
+    /// the holder is told.
+    fn register_shortcut(
+        &mut self,
+        connection: ConnectionId,
+        manager: ObjectId,
+        shortcut: u32,
+        seat: SeatId,
+        chord: Chord,
+    ) -> Result<(), StateError> {
+        self.expect_kind(connection, manager, ObjectKind::Shortcuts)?;
+        if self.shortcuts.len() >= MAX_SHORTCUTS {
+            return Err(StateError::QuotaExceeded { object_id: manager });
+        }
+        if self.shortcuts.contains_key(&(seat, chord)) {
+            return Err(StateError::InvalidState { object_id: manager });
+        }
+        self.shortcuts.insert(
+            (seat, chord),
+            ShortcutClaim {
+                holder: connection,
+                manager,
+                shortcut,
+            },
+        );
+        Ok(())
+    }
+
+    /// The chord this key completes, if somebody has claimed it.
+    fn claimed(&self, key: PhysicalKey) -> Option<ShortcutClaim> {
+        let held = self.seat.keyboard.modifiers;
+        self.shortcuts
+            .iter()
+            .find(|((seat, chord), _)| {
+                *seat == SeatId(1) && chord.trigger == key && chord.accepts(held)
+            })
+            .map(|(_, claim)| *claim)
     }
 
     /// Send to every keyboard object a connection holds.
@@ -2208,6 +2318,8 @@ impl CompositorState {
         {
             self.pointer_target = None;
         }
+        // A holder going releases its chords, or nothing could ever claim them again.
+        self.shortcuts.retain(|_, claim| claim.holder != connection);
         for handle in retired {
             self.tell_shells(EventKind::ShellToplevelGone { handle });
         }

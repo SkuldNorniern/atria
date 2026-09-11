@@ -11,15 +11,20 @@
 use atria_protocol::interface::{Interface, MessageKind, Operation, decode_operation};
 use atria_protocol::message::{
     Attach, Bind, Commit, CreateBuffer, CreatePool, DamageBuffer, GetRegistry, GetToplevel,
-    GlobalName, NewId, SeatHandle, SetTitle, ShellConfigure, ShellHandle, ShellPlace, SizeHint,
+    GlobalName, NewId, SeatHandle, SetTitle, ShellConfigure, ShellHandle, ShellPlace, ShortcutName,
+    ShortcutRegistration, SizeHint,
 };
 use atria_protocol::wire::{Frame, HandleIndex};
 use atria_protocol::{DecodeError, ObjectId, Opcode};
 
 use atria_protocol::message::MAX_TITLE_BYTES;
 
-use crate::model::{ClientRequest, ObjectKind, Point, Rect, SeatId, Size, TitleText};
+use crate::model::{
+    Chord, ChordMatch, ClientRequest, ObjectKind, Point, Rect, SeatId, Size, TitleText,
+};
 use crate::resolve::{HandleResolver, ResolveError, SharedMemory};
+use atria_protocol::key::PhysicalKey;
+
 use crate::shell::ToplevelHandle;
 
 /// Which interface an object of this kind answers, when the draw path defines one.
@@ -44,6 +49,7 @@ pub const fn interface_of(kind: ObjectKind) -> Option<Interface> {
         ObjectKind::ShellControl => Some(Interface::ShellControl),
         ObjectKind::Pointer => Some(Interface::Pointer),
         ObjectKind::Keyboard => Some(Interface::Keyboard),
+        ObjectKind::Shortcuts => Some(Interface::Shortcuts),
         ObjectKind::Seat => Some(Interface::Seat),
         ObjectKind::Session | ObjectKind::Fence | ObjectKind::InputStream => None,
     }
@@ -121,6 +127,16 @@ pub enum DecodedRequest<'a> {
     GetKeyboard {
         seat: ObjectId,
         new_id: ObjectId,
+    },
+    RegisterShortcut {
+        manager: ObjectId,
+        shortcut: u32,
+        seat: SeatId,
+        chord: Chord,
+    },
+    UnregisterShortcut {
+        manager: ObjectId,
+        shortcut: u32,
     },
     /// A shell's request, carrying a compositor-wide handle rather than an object it could name.
     ShellConfigure {
@@ -258,6 +274,27 @@ pub fn decode<'a>(kind: ObjectKind, frame: &Frame<'a>) -> Result<DecodedRequest<
             Ok(DecodedRequest::GetKeyboard {
                 seat: object,
                 new_id: payload.new_id,
+            })
+        }
+        Operation::ShortcutsRegister => {
+            let payload = ShortcutRegistration::decode(frame.payload)?;
+            let mode = ChordMatch::from_raw(payload.mode).ok_or(DecodeError::SizeOverflow)?;
+            Ok(DecodedRequest::RegisterShortcut {
+                manager: object,
+                shortcut: payload.shortcut,
+                seat: SeatId(payload.seat),
+                chord: Chord {
+                    trigger: PhysicalKey::from_usage(payload.trigger),
+                    modifiers: payload.modifiers,
+                    mode,
+                },
+            })
+        }
+        Operation::ShortcutsUnregister => {
+            let payload = ShortcutName::decode(frame.payload)?;
+            Ok(DecodedRequest::UnregisterShortcut {
+                manager: object,
+                shortcut: payload.shortcut,
             })
         }
         Operation::ShellControlConfigure => {
@@ -440,6 +477,20 @@ pub fn resolve(
         }
         DecodedRequest::GetKeyboard { seat, new_id } => {
             Ok(ClientRequest::GetKeyboard { seat, new_id })
+        }
+        DecodedRequest::RegisterShortcut {
+            manager,
+            shortcut,
+            seat,
+            chord,
+        } => Ok(ClientRequest::RegisterShortcut {
+            manager,
+            shortcut,
+            seat,
+            chord,
+        }),
+        DecodedRequest::UnregisterShortcut { manager, shortcut } => {
+            Ok(ClientRequest::UnregisterShortcut { manager, shortcut })
         }
         DecodedRequest::ShellConfigure {
             control,

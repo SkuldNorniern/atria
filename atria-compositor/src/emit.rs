@@ -323,6 +323,28 @@ pub fn encode_event(event: &Event, sequence: u32, out: &mut [u8]) -> Result<usiz
                 out,
             )
         }
+        EventKind::ShortcutTriggered {
+            shortcut,
+            seat,
+            serial,
+            time_ns,
+            epoch,
+        } => {
+            let payload = message::ShortcutTriggered {
+                shortcut: *shortcut,
+                seat: seat.0,
+                serial: *serial,
+                time_ns: *time_ns,
+                epoch: *epoch,
+            };
+            emit(
+                object,
+                Operation::ShortcutsTriggered,
+                sequence,
+                &payload,
+                out,
+            )
+        }
         EventKind::ShellGrabMotion { seat, position } => {
             let payload = message::SeatPoint {
                 seat: seat.0,
