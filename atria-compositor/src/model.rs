@@ -442,12 +442,13 @@ pub enum EventKind {
     FrameLate,
     KeyboardLeave,
     KeyboardEnter,
-    /// This surface now has the seat's keys, and these modifiers are already held.
+    /// This surface now has the seat's keys, and these are already held.
     KeyFocusGained {
         serial: u32,
         surface: ObjectId,
         modifiers: Modifiers,
         epoch: u32,
+        held: Vec<PhysicalKey>,
     },
     /// This surface no longer has the seat's keys.
     KeyFocusLost {

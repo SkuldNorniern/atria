@@ -5,6 +5,7 @@
 //! leaves a client waiting for something that was decided and never sent, which is the hardest
 //! class of bug to find from the outside.
 
+use alloc::vec::Vec;
 use atria_protocol::error::ErrorCode as WireErrorCode;
 use atria_protocol::interface::Operation;
 use atria_protocol::message;
@@ -266,12 +267,15 @@ pub fn encode_event(event: &Event, sequence: u32, out: &mut [u8]) -> Result<usiz
             surface,
             modifiers,
             epoch,
+            held,
         } => {
+            let usages: Vec<u32> = held.iter().map(|key| key.usage()).collect();
             let payload = message::KeyboardEnter {
                 serial: *serial,
                 surface: *surface,
                 modifiers: modifiers.0,
                 epoch: *epoch,
+                held: &usages,
             };
             emit(object, Operation::KeyboardEnter, sequence, &payload, out)
         }

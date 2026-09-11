@@ -249,6 +249,28 @@ struct Scene {
 /// Keys a keyboard can hold at once. Bounds what a misreporting device can make us remember.
 const MAX_HELD_KEYS: usize = 32;
 
+/// One seat's routing: where its devices point, and which world that belongs to.
+///
+/// The epoch and serial belong to the seat, not to a device. A break in continuity breaks it for
+/// everything the seat routes, because they are the same person's hands.
+#[derive(Clone, Debug, Default)]
+struct SeatRouting {
+    /// Advances when routing continuity breaks, so a stale press and a live release are not a pair.
+    epoch: u32,
+    serial: u32,
+    pointer: PointerRouting,
+    keyboard: KeyboardRouting,
+}
+
+/// Where a seat's keys are.
+#[derive(Clone, Debug, Default)]
+struct KeyboardRouting {
+    modifiers: Modifiers,
+    /// Keys held, so focus arriving mid-chord can say what is down. Bounded by `MAX_HELD_KEYS`.
+    held: BTreeSet<PhysicalKey>,
+}
+
+/// Where a seat's pointer is and what holds it.
 #[derive(Clone, Debug, Default)]
 struct PointerRouting {
     position: Point,
@@ -257,12 +279,6 @@ struct PointerRouting {
     target: Option<SurfaceKey>,
     /// The implicit grab lasts as long as any of these is down.
     buttons_held: u32,
-    /// Advances when routing continuity breaks, so a stale press and a live release are not a pair.
-    epoch: u32,
-    serial: u32,
-    modifiers: Modifiers,
-    /// Keys held, so focus arriving mid-chord can say what is down. Bounded by `MAX_HELD_KEYS`.
-    held: BTreeSet<PhysicalKey>,
     /// A shell holding the pointer for a drag. Set during a press, cleared when it comes up.
     shell_grab: Option<(ConnectionId, ObjectId)>,
 }
@@ -290,7 +306,7 @@ pub struct CompositorState {
     globals: BTreeMap<u32, Global>,
     next_global: u32,
     outputs: OutputSet,
-    pointer: PointerRouting,
+    seat: SeatRouting,
     next_configure: u32,
     /// Windows by the handle a shell names them with. Compositor-wide, so it outlives any one
     /// connection — including a shell's.
@@ -321,7 +337,7 @@ impl CompositorState {
             globals: BTreeMap::new(),
             next_global: 1,
             outputs: OutputSet::new(),
-            pointer: PointerRouting::default(),
+            seat: SeatRouting::default(),
             next_configure: 1,
             toplevels: BTreeMap::new(),
             next_handle: 1,
@@ -1236,10 +1252,11 @@ impl CompositorState {
             return Ok(Vec::new());
         }
         let mut events = Vec::with_capacity(2);
-        self.pointer.serial = self.pointer.serial.wrapping_add(1);
-        let serial = self.pointer.serial;
-        let epoch = self.pointer.epoch;
-        let modifiers = self.pointer.modifiers;
+        self.seat.serial = self.seat.serial.wrapping_add(1);
+        let serial = self.seat.serial;
+        let epoch = self.seat.epoch;
+        let modifiers = self.seat.keyboard.modifiers;
+        let held: Vec<PhysicalKey> = self.seat.keyboard.held.iter().copied().collect();
         if let Some(old) = self.keyboard_focus {
             events.push(FocusEvent::KeyboardLeave(old));
             self.push_event(old.connection, old.object_id, EventKind::KeyboardLeave);
@@ -1263,6 +1280,7 @@ impl CompositorState {
                     surface: new.object_id,
                     modifiers,
                     epoch,
+                    held,
                 },
             );
         }
@@ -1804,40 +1822,40 @@ impl CompositorState {
     /// Where the pointer is.
     #[must_use]
     pub const fn pointer_position(&self) -> Point {
-        self.pointer.position
+        self.seat.pointer.position
     }
 
     /// Which routing world the pointer is currently in.
     #[must_use]
     pub const fn pointer_epoch(&self) -> u32 {
-        self.pointer.epoch
+        self.seat.epoch
     }
 
     /// Break routing continuity and start a new epoch. Anything in flight from the old one
     /// carries the old epoch and is recognisable as stale.
     pub fn reset_pointer(&mut self) {
-        if let Some(target) = self.pointer.target.take() {
+        if let Some(target) = self.seat.pointer.target.take() {
             self.send_pointer_leave(target);
         }
-        if let Some((connection, control)) = self.pointer.shell_grab.take() {
+        if let Some((connection, control)) = self.seat.pointer.shell_grab.take() {
             self.push_event(
                 connection,
                 control,
                 EventKind::ShellGrabEnd { seat: SeatId(1) },
             );
         }
-        self.pointer.buttons_held = 0;
+        self.seat.pointer.buttons_held = 0;
         // Keys held in the old world are not held in the new one.
-        self.pointer.held.clear();
-        self.pointer.modifiers = Modifiers::default();
-        self.pointer.epoch = self.pointer.epoch.wrapping_add(1);
+        self.seat.keyboard.held.clear();
+        self.seat.keyboard.modifiers = Modifiers::default();
+        self.seat.epoch = self.seat.epoch.wrapping_add(1);
     }
 
     /// Move the pointer, routing enter, leave and motion to whatever it is over. While a button
     /// is held the target does not change.
     pub fn move_pointer(&mut self, position: Point, time_ns: u64) {
-        self.pointer.position = position;
-        if let Some((connection, control)) = self.pointer.shell_grab {
+        self.seat.pointer.position = position;
+        if let Some((connection, control)) = self.seat.pointer.shell_grab {
             let seat = SeatId(1);
             self.push_event(
                 connection,
@@ -1846,24 +1864,24 @@ impl CompositorState {
             );
             return;
         }
-        if self.pointer.buttons_held != 0 {
-            if let Some(target) = self.pointer.target {
+        if self.seat.pointer.buttons_held != 0 {
+            if let Some(target) = self.seat.pointer.target {
                 self.send_pointer_motion(target, position, time_ns);
             }
             return;
         }
 
         let found = self.surface_under(position);
-        if found != self.pointer.target {
-            if let Some(old) = self.pointer.target {
+        if found != self.seat.pointer.target {
+            if let Some(old) = self.seat.pointer.target {
                 self.send_pointer_leave(old);
             }
-            self.pointer.target = found;
+            self.seat.pointer.target = found;
             if let Some(new) = found {
                 self.send_pointer_enter(new, position);
             }
         }
-        if let Some(target) = self.pointer.target {
+        if let Some(target) = self.seat.pointer.target {
             self.send_pointer_motion(target, position, time_ns);
         }
     }
@@ -1871,42 +1889,42 @@ impl CompositorState {
     /// Press or release a pointer button. A press takes the implicit grab; the last release
     /// gives it back. A press also tells any attached shell which window was pressed.
     pub fn pointer_button(&mut self, button: u32, pressed: bool, time_ns: u64) {
-        if pressed && self.pointer.buttons_held == 0 {
-            self.pointer.target = self.surface_under(self.pointer.position);
-            if let Some(target) = self.pointer.target {
-                self.send_pointer_enter(target, self.pointer.position);
+        if pressed && self.seat.pointer.buttons_held == 0 {
+            self.seat.pointer.target = self.surface_under(self.seat.pointer.position);
+            if let Some(target) = self.seat.pointer.target {
+                self.send_pointer_enter(target, self.seat.pointer.position);
             }
         }
 
         // Checked before any client routing: the grab took the target away, so returning early
         // below would leave the shell holding the pointer for ever.
-        if let Some((connection, control)) = self.pointer.shell_grab {
+        if let Some((connection, control)) = self.seat.pointer.shell_grab {
             if !pressed {
-                self.pointer.buttons_held = self.pointer.buttons_held.saturating_sub(1);
-                if self.pointer.buttons_held == 0 {
-                    self.pointer.shell_grab = None;
+                self.seat.pointer.buttons_held = self.seat.pointer.buttons_held.saturating_sub(1);
+                if self.seat.pointer.buttons_held == 0 {
+                    self.seat.pointer.shell_grab = None;
                     self.push_event(
                         connection,
                         control,
                         EventKind::ShellGrabEnd { seat: SeatId(1) },
                     );
-                    self.pointer.target = self.surface_under(self.pointer.position);
-                    if let Some(target) = self.pointer.target {
-                        self.send_pointer_enter(target, self.pointer.position);
+                    self.seat.pointer.target = self.surface_under(self.seat.pointer.position);
+                    if let Some(target) = self.seat.pointer.target {
+                        self.send_pointer_enter(target, self.seat.pointer.position);
                     }
                 }
             } else {
-                self.pointer.buttons_held = self.pointer.buttons_held.saturating_add(1);
+                self.seat.pointer.buttons_held = self.seat.pointer.buttons_held.saturating_add(1);
             }
             return;
         }
 
-        let Some(target) = self.pointer.target else {
+        let Some(target) = self.seat.pointer.target else {
             return;
         };
-        self.pointer.serial = self.pointer.serial.wrapping_add(1);
-        let serial = self.pointer.serial;
-        let epoch = self.pointer.epoch;
+        self.seat.serial = self.seat.serial.wrapping_add(1);
+        let serial = self.seat.serial;
+        let epoch = self.seat.epoch;
         // On the pointer object, not the surface: the surface is what it is over.
         self.send_to_pointers(target.connection, |_| EventKind::PointerButton {
             serial,
@@ -1917,9 +1935,9 @@ impl CompositorState {
         });
 
         if pressed {
-            self.pointer.buttons_held = self.pointer.buttons_held.saturating_add(1);
+            self.seat.pointer.buttons_held = self.seat.pointer.buttons_held.saturating_add(1);
             if let Some(handle) = self.handle_of_surface(target) {
-                let local = self.surface_local(target, self.pointer.position);
+                let local = self.surface_local(target, self.seat.pointer.position);
                 self.tell_shells(EventKind::ShellInteraction {
                     seat: SeatId(1),
                     handle,
@@ -1929,14 +1947,14 @@ impl CompositorState {
                 });
             }
         } else {
-            self.pointer.buttons_held = self.pointer.buttons_held.saturating_sub(1);
-            if self.pointer.buttons_held == 0 {
-                let under = self.surface_under(self.pointer.position);
+            self.seat.pointer.buttons_held = self.seat.pointer.buttons_held.saturating_sub(1);
+            if self.seat.pointer.buttons_held == 0 {
+                let under = self.surface_under(self.seat.pointer.position);
                 if under != Some(target) {
                     self.send_pointer_leave(target);
-                    self.pointer.target = under;
+                    self.seat.pointer.target = under;
                     if let Some(new) = under {
-                        self.send_pointer_enter(new, self.pointer.position);
+                        self.send_pointer_enter(new, self.seat.pointer.position);
                     }
                 }
             }
@@ -1946,36 +1964,36 @@ impl CompositorState {
     /// Which modifiers are held on the seat.
     #[must_use]
     pub const fn modifiers(&self) -> Modifiers {
-        self.pointer.modifiers
+        self.seat.keyboard.modifiers
     }
 
     /// Press or release a key, routing it to whatever holds focus. The key is a physical
     /// position; what it means depends on a layout the compositor does not own.
     pub fn key(&mut self, key: PhysicalKey, pressed: bool, time_ns: u64) {
         let changed = if pressed {
-            self.pointer.held.len() < MAX_HELD_KEYS && self.pointer.held.insert(key)
+            self.seat.keyboard.held.len() < MAX_HELD_KEYS && self.seat.keyboard.held.insert(key)
         } else {
-            self.pointer.held.remove(&key)
+            self.seat.keyboard.held.remove(&key)
         };
         if !changed {
             // Already down, or not down. Neither is a state change.
             return;
         }
         if let Some(modifier) = Modifiers::of(key) {
-            self.pointer.modifiers = if pressed {
-                self.pointer.modifiers.with(modifier)
+            self.seat.keyboard.modifiers = if pressed {
+                self.seat.keyboard.modifiers.with(modifier)
             } else {
-                self.pointer.modifiers.without(modifier)
+                self.seat.keyboard.modifiers.without(modifier)
             };
         }
 
         let Some(target) = self.keyboard_focus else {
             return;
         };
-        self.pointer.serial = self.pointer.serial.wrapping_add(1);
-        let serial = self.pointer.serial;
-        let epoch = self.pointer.epoch;
-        let modifiers = self.pointer.modifiers;
+        self.seat.serial = self.seat.serial.wrapping_add(1);
+        let serial = self.seat.serial;
+        let epoch = self.seat.epoch;
+        let modifiers = self.seat.keyboard.modifiers;
         self.send_to_keyboards(
             target.connection,
             EventKind::Key {
@@ -2064,9 +2082,9 @@ impl CompositorState {
     }
 
     fn send_pointer_enter(&mut self, target: SurfaceKey, position: Point) {
-        self.pointer.serial = self.pointer.serial.wrapping_add(1);
-        let serial = self.pointer.serial;
-        let epoch = self.pointer.epoch;
+        self.seat.serial = self.seat.serial.wrapping_add(1);
+        let serial = self.seat.serial;
+        let epoch = self.seat.epoch;
         let local = self.surface_local(target, position);
         self.send_to_pointers(target.connection, |_| EventKind::PointerEnter {
             serial,
@@ -2077,9 +2095,9 @@ impl CompositorState {
     }
 
     fn send_pointer_leave(&mut self, target: SurfaceKey) {
-        self.pointer.serial = self.pointer.serial.wrapping_add(1);
-        let serial = self.pointer.serial;
-        let epoch = self.pointer.epoch;
+        self.seat.serial = self.seat.serial.wrapping_add(1);
+        let serial = self.seat.serial;
+        let epoch = self.seat.epoch;
         self.send_to_pointers(target.connection, |_| EventKind::PointerLeave {
             serial,
             surface: target.object_id,
@@ -2088,7 +2106,7 @@ impl CompositorState {
     }
 
     fn send_pointer_motion(&mut self, target: SurfaceKey, position: Point, time_ns: u64) {
-        let epoch = self.pointer.epoch;
+        let epoch = self.seat.epoch;
         let local = self.surface_local(target, position);
         self.send_to_pointers(target.connection, |_| EventKind::PointerMotion {
             time_ns,
@@ -2662,14 +2680,14 @@ impl CompositorState {
         let _ = seat;
         let (connection, object_id) = self.shell_target(shell, handle)?;
         let _ = (connection, object_id);
-        if self.pointer.buttons_held == 0 {
+        if self.seat.pointer.buttons_held == 0 {
             return Err(ShellError::UnknownHandle { handle });
         }
         // The client stops seeing the pointer, rather than waiting for a release it will not get.
-        if let Some(target) = self.pointer.target.take() {
+        if let Some(target) = self.seat.pointer.target.take() {
             self.send_pointer_leave(target);
         }
-        self.pointer.shell_grab = Some((shell, control));
+        self.seat.pointer.shell_grab = Some((shell, control));
         Ok(())
     }
 
