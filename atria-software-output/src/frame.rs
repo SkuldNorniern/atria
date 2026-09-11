@@ -74,6 +74,11 @@ impl Frame {
         &self.bytes
     }
 
+    /// Set every pixel back to nothing, keeping the allocation.
+    pub(crate) fn clear(&mut self) {
+        self.bytes.fill(0);
+    }
+
     pub(crate) fn bytes_mut(&mut self) -> &mut [u8] {
         &mut self.bytes
     }

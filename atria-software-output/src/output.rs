@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
+use std::mem::swap;
 
 use atria_compositor::{
     BufferDescriptor, BufferState, BufferTransport, CommitId, CompositorState, Damage, Point, Rect,
@@ -30,6 +31,9 @@ struct SurfaceImage {
 #[derive(Clone, Debug)]
 pub struct SoftwareOutput {
     frame: Frame,
+    /// Composed into, then swapped with `frame`. Two lasting allocations rather than one per
+    /// frame, which at 1280x720 is 3.5 MB of churn per pointer movement.
+    spare: Frame,
     surfaces: BTreeMap<SurfaceKey, SurfaceImage>,
 }
 
@@ -37,6 +41,7 @@ impl SoftwareOutput {
     pub fn new(size: Size, layout: PixelLayout) -> Result<Self, ValidationError> {
         Ok(Self {
             frame: Frame::new(size, layout)?,
+            spare: Frame::new(size, layout)?,
             surfaces: BTreeMap::new(),
         })
     }
@@ -188,8 +193,8 @@ impl SoftwareOutput {
         }
 
         staged_surfaces.retain(|surface, _| active.contains(surface));
-        let mut staged_frame = Frame::new(self.frame.size(), self.frame.layout())
-            .map_err(ComposeError::InvalidOutput)?;
+        // Into the kept frame, then swapped in.
+        self.spare.clear();
         for &surface in state.stacking_order() {
             let snapshot = state
                 .surface_snapshot(surface.connection, surface.object_id)
@@ -200,7 +205,7 @@ impl SoftwareOutput {
             let image = staged_surfaces
                 .get(&surface)
                 .ok_or(ComposeError::MissingSurfaceState(surface))?;
-            blit_surface(surface, image, position, snapshot.offset, &mut staged_frame)?;
+            blit_surface(surface, image, position, snapshot.offset, &mut self.spare)?;
         }
 
         for (surface, buffer) in &consumed {
@@ -217,10 +222,10 @@ impl SoftwareOutput {
             surfaces_composited: staged_surfaces.len(),
             commits_consumed: consumed.len(),
             damage_rectangles_consumed: damage_count,
-            bytes_written: staged_frame.bytes().len(),
+            bytes_written: self.spare.bytes().len(),
         };
         self.surfaces = staged_surfaces;
-        self.frame = staged_frame;
+        swap(&mut self.frame, &mut self.spare);
         Ok(report)
     }
 
