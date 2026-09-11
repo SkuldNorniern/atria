@@ -156,6 +156,43 @@ impl PixelFormat {
     }
 }
 
+/// The HID usage an X11 keysym names, or nothing when this server cannot place the key.
+///
+/// RFB carries keysyms, which say what a key means under some layout. Atria carries physical
+/// positions. Translating is guesswork in general, and this is the part that is not: the letters,
+/// digits and named keys whose position is the same on every keyboard this will meet.
+#[must_use]
+pub const fn usage_of_keysym(keysym: u32) -> Option<u32> {
+    use atria_protocol::key::usage;
+    match keysym {
+        // Case is what a key means, not where it is.
+        0x41..=0x5a => Some(usage::A + (keysym - 0x41)),
+        0x61..=0x7a => Some(usage::A + (keysym - 0x61)),
+        // HID puts zero after nine, because that is where it sits on the row.
+        0x31..=0x39 => Some(usage::ONE + (keysym - 0x31)),
+        0x30 => Some(usage::ONE + 9),
+        0xff0d => Some(usage::ENTER),
+        0xff1b => Some(usage::ESCAPE),
+        0xff08 => Some(usage::BACKSPACE),
+        0xff09 => Some(usage::TAB),
+        0x20 => Some(usage::SPACE),
+        0xff51 => Some(usage::LEFT),
+        0xff52 => Some(usage::UP),
+        0xff53 => Some(usage::RIGHT),
+        0xff54 => Some(usage::DOWN),
+        0xffe1 => Some(usage::LEFT_SHIFT),
+        0xffe2 => Some(usage::RIGHT_SHIFT),
+        0xffe3 => Some(usage::LEFT_CONTROL),
+        0xffe4 => Some(usage::RIGHT_CONTROL),
+        0xffe9 => Some(usage::LEFT_ALT),
+        0xffea => Some(usage::RIGHT_ALT),
+        0xffeb => Some(usage::LEFT_META),
+        0xffec => Some(usage::RIGHT_META),
+        0xffbe..=0xffc5 => Some(usage::F1 + (keysym - 0xffbe)),
+        _ => None,
+    }
+}
+
 /// Read exactly `out.len()` bytes, or fail.
 pub fn read_exact(stream: &mut impl Read, out: &mut [u8]) -> io::Result<()> {
     stream.read_exact(out)

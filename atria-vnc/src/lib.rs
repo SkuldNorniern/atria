@@ -11,4 +11,4 @@ pub mod protocol;
 mod server;
 
 pub use protocol::PixelFormat;
-pub use server::{PointerInput, VncError, VncSink};
+pub use server::{Input, KeyInput, PointerInput, VncError, VncSink};

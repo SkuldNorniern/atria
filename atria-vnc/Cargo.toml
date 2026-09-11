@@ -7,6 +7,7 @@ rust-version.workspace = true
 description = "A remote framebuffer sink, so a composed frame can be looked at"
 
 [dependencies]
+atria-protocol = { path = "../atria-protocol" }
 atria-software-output = { path = "../atria-software-output" }
 
 [lints]

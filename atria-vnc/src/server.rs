@@ -15,7 +15,7 @@ use atria_software_output::{Frame, FrameReport, FrameSink, SinkError};
 
 use crate::protocol::{
     PixelFormat, SECURITY_NONE, VERSION, changed_regions, client_message, client_message_length,
-    encoding, pixel_format, read_exact, write_update,
+    encoding, pixel_format, read_exact, usage_of_keysym, write_update,
 };
 
 /// Why the framebuffer could not be served.
@@ -79,16 +79,28 @@ pub struct PointerInput {
     pub buttons: u8,
 }
 
+/// A key the viewer pressed or released, by physical position.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct KeyInput {
+    /// A USB HID Keyboard/Keypad usage.
+    pub usage: u32,
+    pub pressed: bool,
+}
+
+/// What a viewer did.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Input {
+    Pointer(PointerInput),
+    Key(KeyInput),
+}
+
 #[derive(Default)]
 struct Latest {
     frame: Mutex<(u64, Vec<u8>)>,
     composed: Condvar,
-    /// What the viewer has done since anyone last looked.
-    ///
-    /// Bounded: a viewer that moves its pointer faster than the compositor reads loses the
-    /// intermediate positions, which is the right thing to lose. A queue that grew without limit
-    /// would let a viewer make the compositor's memory its own.
-    input: Mutex<Vec<PointerInput>>,
+    /// What the viewer has done since anyone last looked. Bounded: a viewer faster than the
+    /// compositor reads loses the oldest, rather than making the compositor's memory its own.
+    input: Mutex<Vec<Input>>,
 }
 
 /// How many pointer reports are kept between reads.
@@ -166,7 +178,7 @@ impl VncSink {
 
     /// Take what the viewer has done since this was last called.
     #[must_use]
-    pub fn take_input(&self) -> Vec<PointerInput> {
+    pub fn take_input(&self) -> Vec<Input> {
         // Drain whatever woke us, so the descriptor stops being readable until the next report.
         let mut discard = [0_u8; 64];
         while (&self.waker).read(&mut discard).is_ok_and(|read| read > 0) {}
@@ -379,6 +391,20 @@ impl Viewer {
         let buttons = body[0];
         let x = i32::from(u16::from_be_bytes([body[1], body[2]]));
         let y = i32::from(u16::from_be_bytes([body[3], body[4]]));
+        self.record(Input::Pointer(PointerInput { x, y, buttons }));
+    }
+
+    /// Record what a `KeyEvent` said, if the key is one this server can name.
+    fn record_key(&self, body: &[u8]) {
+        let pressed = body[0] != 0;
+        let keysym = u32::from_be_bytes([body[3], body[4], body[5], body[6]]);
+        let Some(usage) = usage_of_keysym(keysym) else {
+            return;
+        };
+        self.record(Input::Key(KeyInput { usage, pressed }));
+    }
+
+    fn record(&self, input: Input) {
         let mut held = self
             .latest
             .input
@@ -387,7 +413,7 @@ impl Viewer {
         if held.len() >= MAX_PENDING_INPUT {
             held.remove(0);
         }
-        held.push(PointerInput { x, y, buttons });
+        held.push(input);
         drop(held);
         let _unused = (&self.waker).write(&[1]);
     }
@@ -434,6 +460,9 @@ impl Viewer {
             stream.read_exact(&mut body)?;
             if number == client_message::POINTER_EVENT {
                 self.record_pointer(&body);
+            }
+            if number == client_message::KEY_EVENT {
+                self.record_key(&body);
             }
             if number == client_message::FRAMEBUFFER_UPDATE_REQUEST && body[0] == 0 {
                 *asked_whole = true;
