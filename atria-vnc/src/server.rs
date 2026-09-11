@@ -75,7 +75,8 @@ impl Error for VncError {
 /// again".
 #[derive(Default)]
 struct Latest {
-    frame: Mutex<(u64, Vec<u8>)>,
+    /// Shared, not copied: a viewer holds these bytes while the next frame is composed.
+    frame: Mutex<(u64, Arc<Vec<u8>>)>,
     composed: Condvar,
     input: Mutex<InputQueue>,
     /// Keysyms this server could not place, so each is reported once rather than every press.
@@ -84,15 +85,12 @@ struct Latest {
 
 /// A sink that shows the composed output to one connected viewer.
 ///
-/// The viewer lives on its own thread and reads from [`Latest`]. Two properties depend on that
-/// separation: a viewer can complete its handshake while the compositor is idle, and a viewer too
-/// slow to keep up falls behind instead of holding the compositor at the write. An observer that
-/// can change what it observes is not an observer.
+/// The viewer runs on its own thread, so a slow one falls behind rather than holding the
+/// compositor at the write.
 pub struct VncSink {
     latest: Arc<Latest>,
     frames_composed: u64,
-    /// Read end of the pair the viewer thread writes to when input arrives, so a server waiting
-    /// on descriptors wakes on a pointer the instant it moves.
+    /// Readable when the viewer has done something, so a server waiting on descriptors wakes.
     waker: UnixStream,
 }
 
@@ -142,11 +140,7 @@ impl VncSink {
         self.frames_composed
     }
 
-    /// A descriptor that becomes readable when a viewer has done something.
-    ///
-    /// A server can wait on this alongside its own sockets instead of polling on a timer, which
-    /// is the difference between a pointer being read now and being read some milliseconds from
-    /// now.
+    /// Readable when a viewer has done something, to be waited on alongside a server's sockets.
     #[must_use]
     pub fn wakeup(&self) -> BorrowedFd<'_> {
         self.waker.as_fd()
@@ -163,11 +157,7 @@ impl VncSink {
             .is_stale()
     }
 
-    /// Whether input was lost since this was last called.
-    ///
-    /// True means a transition could not be queued, so what the compositor believes about held
-    /// keys and buttons no longer matches the device. The answer is a new routing epoch, not a
-    /// guess at what was missed.
+    /// Whether a transition was lost. The answer is a new routing epoch, not a guess.
     #[must_use]
     pub fn overflowed(&self) -> bool {
         self.latest
@@ -196,9 +186,8 @@ impl Viewer {
     /// Accept one viewer at a time, forever. A viewer that fails is dropped and the next is
     /// accepted; nothing about a broken connection reaches the compositor.
     fn serve(self) {
-        // Non-blocking, so a viewer arriving while another is attached is noticed rather than
-        // left in the backlog. One at a time, and the newest wins: a viewer that reconnects
-        // before its old socket is noticed would otherwise wait behind itself.
+        // Non-blocking: one viewer at a time, and the newest wins. A reconnecting viewer would
+        // otherwise wait behind its own dead socket.
         if self.listener.set_nonblocking(true).is_err() {
             return;
         }
@@ -207,8 +196,7 @@ impl Viewer {
                 thread::sleep(VIEWER_TICK);
                 continue;
             };
-            // A viewer connecting after the last composition still sees it: the output has a
-            // current state whether or not anything changed while somebody was watching.
+            // A viewer connecting after the last composition still sees it.
             let mut shown = 0;
             let mut asked = false;
             // A full request must be answered whole, whatever the diff says. A viewer asks after
@@ -217,7 +205,7 @@ impl Viewer {
             let mut format = PixelFormat::declared();
             // What this viewer was last sent. Per viewer: a rectangle list is only correct
             // against the frame it was computed from.
-            let mut sent: Option<Vec<u8>> = None;
+            let mut sent: Option<Arc<Vec<u8>>> = None;
             // Raw until the viewer asks for something else.
             let mut hextile = false;
             loop {
@@ -232,9 +220,7 @@ impl Viewer {
                     sent = None;
                     hextile = false;
                 }
-                // Read first, always. This is where a viewer's input arrives and where its
-                // departure is noticed, and a server that only read before writing would stop
-                // hearing from a viewer that had stopped asking for frames.
+                // Read first: input arrives here, and so does a departure.
                 if let Err(error) = self.drain_requests(
                     &mut stream,
                     &mut asked,
@@ -245,11 +231,14 @@ impl Viewer {
                     report(&error);
                     break;
                 }
-                // Sent only when asked for. Pushing one at a client that is not reading fills
-                // the socket and blocks this thread, and its input with it.
+                // Only when asked: pushing at a client that is not reading blocks this thread.
                 if asked && let Some(frame) = self.frame_after(shown) {
                     shown = frame.0;
-                    let previous = if asked_whole { None } else { sent.as_deref() };
+                    let previous = if asked_whole {
+                        None
+                    } else {
+                        sent.as_deref().map(Vec::as_slice)
+                    };
                     let regions = changed_regions(previous, &frame.1, self.size.0, self.size.1);
                     // Nothing changed. The request stays outstanding rather than being answered
                     // empty, so the next frame that does change something reaches it unasked.
@@ -270,7 +259,8 @@ impl Viewer {
                     }
                     sent = Some(frame.1);
                 }
-                self.wait_briefly(shown);
+                // Waits unless there is something to send, or a quiet viewer burns a core.
+                self.wait_briefly(if asked { shown } else { u64::MAX });
             }
         }
     }
@@ -290,8 +280,7 @@ impl Viewer {
     /// Take a waiting viewer, if one is there. Never waits.
     fn accept(&self) -> Option<TcpStream> {
         let (mut stream, _) = self.listener.accept().ok()?;
-        // An update is one write with nothing to coalesce it with. Waiting for more costs up to
-        // forty milliseconds a frame, which is most of the latency.
+        // One write with nothing to coalesce it with; Nagle would cost 40ms a frame.
         let _unused = stream.set_nodelay(true);
         match self.handshake(&mut stream) {
             Ok(()) => {
@@ -307,7 +296,7 @@ impl Viewer {
     }
 
     /// The composed frame, if one newer than `shown` exists. Never waits.
-    fn frame_after(&self, shown: u64) -> Option<(u64, Vec<u8>)> {
+    fn frame_after(&self, shown: u64) -> Option<(u64, Arc<Vec<u8>>)> {
         let held = self
             .latest
             .frame
@@ -316,21 +305,19 @@ impl Viewer {
         if held.0 == shown || held.1.is_empty() {
             return None;
         }
-        Some((held.0, held.1.clone()))
+        Some((held.0, Arc::clone(&held.1)))
     }
 
     /// Sleep until something is composed, or briefly, whichever comes first.
     ///
-    /// Bounded so that a viewer's input and its departure are still noticed while nothing is
-    /// being composed. Waiting on the condvar rather than sleeping means a frame wakes this
-    /// immediately instead of after the interval.
+    /// `shown` is the frame already sent, or `u64::MAX` when there is nothing to send.
     fn wait_briefly(&self, shown: u64) {
         let held = self
             .latest
             .frame
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if held.0 != shown {
+        if held.0 != shown && shown != u64::MAX {
             return;
         }
         let _unused = self
@@ -411,10 +398,8 @@ impl Viewer {
         self.queue(|queue| queue.key(usage, pressed));
     }
 
-    /// Name a keysym this server has no position for, once.
-    ///
-    /// A key that does nothing and says nothing is indistinguishable from a key the viewer never
-    /// sent. Saying which keysym arrived is the difference between a guess and a fix.
+    /// Name a keysym this server has no position for, once. A key that does nothing silently is
+    /// indistinguishable from one the viewer never sent.
     fn report_unplaced(&self, keysym: u32) {
         let mut seen = self
             .latest
@@ -534,10 +519,8 @@ impl Viewer {
     }
 }
 
-/// Read and throw away `length` bytes, without allocating for them.
-///
-/// Past what a clipboard could plausibly hold the connection is dropped instead: staying in step
-/// with a viewer sending gigabytes is not worth the time it would take to read them.
+/// Read and throw away `length` bytes without allocating for them. Past [`MAX_CUT_TEXT`] the
+/// connection is dropped instead.
 fn discard(stream: &mut TcpStream, length: usize) -> io::Result<()> {
     if length > MAX_CUT_TEXT {
         return Err(io::Error::new(
@@ -580,8 +563,16 @@ impl FrameSink for VncSink {
         // call returns. The copy is into the buffer already held, so a steady stream of frames
         // does not allocate.
         held.0 = self.frames_composed;
-        held.1.clear();
-        held.1.extend_from_slice(frame.bytes());
+        // Written into the allocation already there when nothing else is reading it, so a steady
+        // stream of frames does not allocate. A viewer still holding the last one gets a new
+        // allocation instead of having the bytes changed underneath it.
+        match Arc::get_mut(&mut held.1) {
+            Some(owned) => {
+                owned.clear();
+                owned.extend_from_slice(frame.bytes());
+            }
+            None => held.1 = Arc::new(frame.bytes().to_vec()),
+        }
         drop(held);
         self.latest.composed.notify_all();
         Ok(())

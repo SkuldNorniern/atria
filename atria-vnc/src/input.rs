@@ -1,9 +1,7 @@
 //! What a viewer did, kept in the order it happened.
 //!
-//! Split by what may be lost. A pointer position is state: a newer one carries everything an
-//! older one did, so a run of motion can be collapsed to its last without losing anything. A key
-//! or a button is a transition, and dropping one leaves the compositor believing something is
-//! held that is not, with nothing later to correct it.
+//! A pointer position is state, so a run of motion collapses to its last. A key or a button is a
+//! transition, and dropping one leaves the compositor believing something is held that is not.
 
 use core::mem::take;
 
@@ -64,8 +62,7 @@ impl InputQueue {
 
     /// Queue a `PointerEvent` body: a button mask, then x and y.
     ///
-    /// RFB reports the whole mask every time. A mask is state; the compositor needs transitions,
-    /// and deriving them here is what lets the position be collapsed while the presses are not.
+    /// RFB reports the whole mask each time; the transitions are derived here.
     pub fn pointer(&mut self, body: &[u8]) {
         if body.len() < 5 {
             return;
@@ -116,10 +113,7 @@ impl InputQueue {
         take(&mut self.stale)
     }
 
-    /// Whether a transition was lost since this was last asked.
-    ///
-    /// True means what the compositor believes about held keys and buttons no longer matches the
-    /// device. The answer is a new routing epoch, not a guess at what was missed.
+    /// Whether a transition was lost. The answer is a new routing epoch, not a guess.
     #[must_use]
     pub fn overflowed(&mut self) -> bool {
         take(&mut self.overflowed)
