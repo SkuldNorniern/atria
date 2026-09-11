@@ -97,7 +97,14 @@ fn run() -> io::Result<()> {
 
     // Advertised once. Which globals exist is the compositor's decision, and a client learns
     // them from its registry rather than being handed identifiers it did not choose.
-    for kind in [ObjectKind::Compositor, ObjectKind::Shm] {
+    // The shell authority is offered to everyone and bindable only with the grant. What exists is
+    // not a secret; holding it is what is gated.
+    for kind in [
+        ObjectKind::Compositor,
+        ObjectKind::Shm,
+        ObjectKind::Shell,
+        ObjectKind::ShellControl,
+    ] {
         if state.advertise_global(kind, VERSION).is_none() {
             return Err(io::Error::other("a global could not be advertised"));
         }
