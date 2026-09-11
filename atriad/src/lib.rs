@@ -34,7 +34,9 @@ pub fn software_capabilities() -> CapabilitySet {
 #[must_use]
 pub fn compositor(server: ServerLimits, connection: ConnectionLimits) -> CompositorState {
     CompositorState::new(
-        software_capabilities().with(Capability::ShellControl),
+        software_capabilities()
+            .with(Capability::ShellControl)
+            .with(Capability::ShortcutControl),
         server,
         connection,
     )

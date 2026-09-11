@@ -16,7 +16,8 @@ use std::process::exit;
 use atria_protocol::interface::{Interface, Operation};
 use atria_protocol::message::{
     Bind, EncodePayload, NewId, RegistryGlobal, SeatHandle, SeatPoint, ShellHandle,
-    ShellInteraction, ShellPlace, ShellToplevel, encode_message,
+    ShellInteraction, ShellPlace, ShellToplevel, ShortcutRegistration, ShortcutTriggered,
+    encode_message,
 };
 use atria_protocol::wire::{Frame, MAX_MESSAGE_SIZE};
 use atria_protocol::{ObjectId, Opcode};
@@ -31,6 +32,21 @@ const CONTROL: u32 = 3;
 
 /// The one seat this server has. Named rather than assumed, because focus belongs to a seat.
 const SEAT: u64 = 1;
+
+/// The chord manager, and the chords this shell claims.
+const SHORTCUTS: u32 = 4;
+const CLOSE_FOCUSED: u32 = 1;
+const CYCLE_WINDOWS: u32 = 2;
+
+/// HID usages for the keys those chords use.
+const USAGE_Q: u32 = 0x14;
+const USAGE_TAB: u32 = 0x2b;
+
+/// The meta bit, as the compositor reports modifiers.
+const META: u32 = 1 << 3;
+
+/// Modifiers must match exactly, so Super+Shift+Q is somebody else's chord.
+const MATCH_EXACT: u32 = 0;
 
 /// Each window is offset from the last by this much, so none hides another completely.
 ///
@@ -77,6 +93,32 @@ fn main() {
 
     // Everything that already exists arrives before the boundary. After it, the same event means
     // a window just appeared — which is why there is no second event for that case.
+    let manager = shell.global_named(Interface::Shortcuts);
+    shell.request(
+        id(REGISTRY),
+        Operation::RegistryBind,
+        &Bind {
+            name: manager,
+            version: 1,
+            new_id: id(SHORTCUTS),
+        },
+    );
+    // Claimed rather than watched for: the shell learns these chords fired and nothing about
+    // anything else typed.
+    for (shortcut, trigger) in [(CLOSE_FOCUSED, USAGE_Q), (CYCLE_WINDOWS, USAGE_TAB)] {
+        shell.request(
+            id(SHORTCUTS),
+            Operation::ShortcutsRegister,
+            &ShortcutRegistration {
+                shortcut,
+                seat: SEAT,
+                trigger,
+                modifiers: META,
+                mode: MATCH_EXACT,
+            },
+        );
+    }
+
     let mut inherited = shell.take_snapshot();
     inherited.dedup();
     println!("elysium0: inherited {} window(s)", inherited.len());
@@ -88,6 +130,7 @@ fn main() {
     // the same window arrives again whenever anything about it changes — a shell that counted
     // arrivals would move a window every time it was renamed.
     let mut known: Vec<u64> = inherited;
+    let mut focused: Option<u64> = None;
     let mut dragging: Option<u64> = None;
     let mut grabbed_at: Option<(i32, i32)> = None;
     loop {
@@ -160,7 +203,45 @@ fn main() {
                 dragging = None;
                 grabbed_at = None;
             }
+            Some(Told::Shortcut(CLOSE_FOCUSED)) => {
+                let Some(handle) = focused else {
+                    continue;
+                };
+                shell.request(
+                    id(CONTROL),
+                    Operation::ShellControlClose,
+                    &ShellHandle { handle },
+                );
+                println!("elysium0: asked window {handle} to close");
+            }
+            Some(Told::Shortcut(CYCLE_WINDOWS)) => {
+                let Some(next) = known
+                    .iter()
+                    .copied()
+                    .cycle()
+                    .skip_while(|handle| Some(*handle) != focused)
+                    .nth(1)
+                else {
+                    continue;
+                };
+                shell.request(
+                    id(CONTROL),
+                    Operation::ShellControlRaise,
+                    &ShellHandle { handle: next },
+                );
+                shell.request(
+                    id(CONTROL),
+                    Operation::ShellControlFocus,
+                    &SeatHandle {
+                        seat: SEAT,
+                        handle: next,
+                    },
+                );
+                println!("elysium0: cycled to window {next}");
+            }
+            Some(Told::Shortcut(_)) => {}
             Some(Told::FocusChanged(handle)) => {
+                focused = (handle != 0).then_some(handle);
                 println!("elysium0: focus is now {handle}");
             }
             Some(Told::Other) => {}
@@ -184,6 +265,8 @@ enum Told {
     GrabMotion(i32, i32),
     /// The shell no longer holds the pointer.
     GrabEnd,
+    /// A chord this shell claimed fired.
+    Shortcut(u32),
     Other,
 }
 
@@ -249,10 +332,20 @@ impl Shell {
     fn next_event(&mut self) -> Option<Told> {
         let envelope = self.receive()?;
         let frame = Frame::decode(&envelope).ok()?;
+        let opcode = frame.header.opcode.into_raw();
+        // The object is checked before the opcode, always. An opcode is local to its interface,
+        // so `shortcuts.triggered` and `shell_control.toplevel` are both zero.
+        if frame.header.object_id == id(SHORTCUTS) {
+            if opcode == Operation::ShortcutsTriggered.opcode() {
+                return ShortcutTriggered::decode(frame.payload)
+                    .ok()
+                    .map(|payload| Told::Shortcut(payload.shortcut));
+            }
+            return Some(Told::Other);
+        }
         if frame.header.object_id != id(CONTROL) {
             return Some(Told::Other);
         }
-        let opcode = frame.header.opcode.into_raw();
         if opcode == Operation::ShellControlToplevel.opcode() {
             return ShellToplevel::decode(frame.payload)
                 .ok()

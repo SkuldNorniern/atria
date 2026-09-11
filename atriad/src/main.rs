@@ -113,6 +113,7 @@ fn run() -> io::Result<()> {
         ObjectKind::Shell,
         ObjectKind::ShellControl,
         ObjectKind::Seat,
+        ObjectKind::Shortcuts,
     ] {
         if state.advertise_global(kind, VERSION).is_none() {
             return Err(io::Error::other("a global could not be advertised"));
@@ -336,18 +337,24 @@ fn admit(
     // whatever it asks for — the refusal is in what it was admitted with, not in a check further
     // down.
     let available = if shell {
-        software_capabilities().with(Capability::ShellControl)
+        software_capabilities()
+            .with(Capability::ShellControl)
+            .with(Capability::ShortcutControl)
     } else {
         software_capabilities()
     };
     let connection = state
         .connect(available, CapabilitySet::empty())
         .map_err(|error| io::Error::other(format!("the connection was refused: {error:?}")))?;
-    if shell && let Err(error) = state.grant_capability(connection, Capability::ShellControl) {
-        state.close_connection(connection);
-        return Err(io::Error::other(format!(
-            "the shell authority could not be granted: {error:?}"
-        )));
+    if shell {
+        for granted in [Capability::ShellControl, Capability::ShortcutControl] {
+            if let Err(error) = state.grant_capability(connection, granted) {
+                state.close_connection(connection);
+                return Err(io::Error::other(format!(
+                    "a shell authority could not be granted: {error:?}"
+                )));
+            }
+        }
     }
     if let Err(error) = establish_session(state, connection) {
         state.close_connection(connection);
