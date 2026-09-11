@@ -9,7 +9,7 @@ use std::io;
 use std::mem::zeroed;
 use std::os::fd::{AsRawFd, OwnedFd};
 
-use libc::{S_IFMT, S_IFREG, fstat, stat};
+use libc::{S_IFMT, S_IFREG, c_void, fstat, off_t, pread, stat};
 
 use atria_compositor::SharedMemory;
 
@@ -48,6 +48,47 @@ impl SharedMemoryStore {
             .ok_or_else(|| io::Error::other("shared-memory identities exhausted"))?;
         self.live.insert(id, handle);
         Ok(SharedMemory::new(id, size))
+    }
+
+    /// Read `len` bytes from `offset` of the memory an identity names.
+    ///
+    /// A read rather than a mapping, deliberately. A client owns this memory and may shrink it;
+    /// reading through a mapping of a region that is no longer there faults the compositor, while
+    /// a short read is an error it can refuse. The copy is what the software path costs, and it
+    /// is reported rather than hidden.
+    ///
+    /// # Errors
+    ///
+    /// Returns the platform's error, or `UnexpectedEof` when the region is no longer backed by as
+    /// much memory as the buffer claims.
+    pub fn read(&self, memory: SharedMemory, offset: u32, len: usize) -> io::Result<Vec<u8>> {
+        let handle = self
+            .live
+            .get(&memory.id())
+            .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+        let mut bytes = vec![0_u8; len];
+        let mut filled = 0;
+        while filled < len {
+            // SAFETY: `pread` writes at most `len - filled` bytes into the tail of `bytes`, which
+            // is owned here, and reads only the borrowed descriptor. It does not move the file
+            // offset, so the descriptor the client also holds is undisturbed.
+            let read = unsafe {
+                pread(
+                    handle.as_raw_fd(),
+                    bytes.as_mut_ptr().add(filled).cast::<c_void>(),
+                    len - filled,
+                    off_t::from(offset).saturating_add(filled as off_t),
+                )
+            };
+            if read < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if read == 0 {
+                return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
+            }
+            filled += read as usize;
+        }
+        Ok(bytes)
     }
 
     /// Release what an identity named. Returns whether it was held.
