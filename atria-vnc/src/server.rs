@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
 use std::io::{self, ErrorKind, Read, Write};
+use std::mem::replace;
 use std::net::{TcpListener, TcpStream};
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
@@ -90,6 +91,11 @@ struct Latest {
 pub struct VncSink {
     latest: Arc<Latest>,
     frames_composed: u64,
+    /// Frame allocations no viewer holds, reused rather than faulted in again.
+    spare: Vec<Vec<u8>>,
+    /// Frames handed out and not yet let go of. A viewer holds the last frame it drew, so the
+    /// one just replaced becomes reusable a frame later.
+    retiring: Vec<Arc<Vec<u8>>>,
     /// Readable when the viewer has done something, so a server waiting on descriptors wakes.
     waker: UnixStream,
 }
@@ -130,6 +136,8 @@ impl VncSink {
         Ok(Self {
             latest,
             frames_composed: 0,
+            spare: Vec::new(),
+            retiring: Vec::new(),
             waker,
         })
     }
@@ -275,6 +283,9 @@ const MAX_REPORTED_KEYSYMS: usize = 64;
 /// How long the viewer sleeps before reading its connection again. This bounds how long a pointer
 /// report waits before the compositor is told, so it is short.
 const VIEWER_TICK: Duration = Duration::from_millis(2);
+
+/// A viewer holds at most the frame it last drew, so two is enough and the pool cannot grow.
+const SPARE_FRAMES: usize = 2;
 
 impl Viewer {
     /// Take a waiting viewer, if one is there. Never waits.
@@ -554,27 +565,35 @@ fn alloc_message(number: u8) -> String {
 impl FrameSink for VncSink {
     fn present(&mut self, frame: &Frame, _report: FrameReport) -> Result<(), SinkError> {
         self.frames_composed += 1;
+        // Copied: the frame belongs to the next composition once this returns.
+        let mut bytes = self.spare.pop().unwrap_or_default();
+        bytes.clear();
+        bytes.extend_from_slice(frame.bytes());
+
         let mut held = self
             .latest
             .frame
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        // Copied rather than borrowed: the frame belongs to the next composition the moment this
-        // call returns. The copy is into the buffer already held, so a steady stream of frames
-        // does not allocate.
         held.0 = self.frames_composed;
-        // Written into the allocation already there when nothing else is reading it, so a steady
-        // stream of frames does not allocate. A viewer still holding the last one gets a new
-        // allocation instead of having the bytes changed underneath it.
-        match Arc::get_mut(&mut held.1) {
-            Some(owned) => {
-                owned.clear();
-                owned.extend_from_slice(frame.bytes());
-            }
-            None => held.1 = Arc::new(frame.bytes().to_vec()),
-        }
+        let replaced = replace(&mut held.1, Arc::new(bytes));
         drop(held);
         self.latest.composed.notify_all();
+
+        self.retiring.push(replaced);
+        let mut index = self.retiring.len();
+        while index > 0 {
+            index -= 1;
+            if Arc::strong_count(&self.retiring[index]) != 1 {
+                continue;
+            }
+            let frame = self.retiring.swap_remove(index);
+            if let Ok(bytes) = Arc::try_unwrap(frame)
+                && self.spare.len() < SPARE_FRAMES
+            {
+                self.spare.push(bytes);
+            }
+        }
         Ok(())
     }
 }
