@@ -58,6 +58,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "atria-vnc"
+version = "0.1.0"
+dependencies = [
+ "atria-software-output",
+]
+
+[[package]]
 name = "atriad"
 version = "0.1.0"
 dependencies = [
@@ -65,6 +72,7 @@ dependencies = [
  "atria-protocol",
  "atria-software-output",
  "atria-transport",
+ "atria-vnc",
  "libc",
 ]
 
