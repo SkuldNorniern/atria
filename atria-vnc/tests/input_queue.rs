@@ -101,3 +101,27 @@ fn overflow_is_reported_once_and_then_cleared() {
         "asking twice does not mean it happened twice"
     );
 }
+
+#[test]
+fn letting_go_forgets_the_buttons_a_viewer_left_held() {
+    let mut queue = sink();
+    queue.pointer(&pointer(1, 10, 10));
+    let _ = queue.take();
+
+    // The viewer went away holding the button, and comes back holding nothing.
+    queue.forget_held();
+    assert!(queue.is_stale(), "the compositor is told to let go");
+    assert!(!queue.is_stale(), "and told once, not for ever");
+
+    // The same mask again is a fresh press, not a repeat of one believed still down.
+    queue.pointer(&pointer(1, 10, 10));
+    let pressed = queue
+        .take()
+        .into_iter()
+        .filter(|input| matches!(input, Input::Button(button) if button.pressed))
+        .count();
+    assert_eq!(
+        pressed, 1,
+        "a viewer that comes back pressing is pressing, not continuing"
+    );
+}

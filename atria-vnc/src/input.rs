@@ -52,6 +52,8 @@ pub struct InputQueue {
     buttons: u8,
     /// Set when a transition could not be kept.
     overflowed: bool,
+    /// Set when what is held can no longer be trusted.
+    stale: bool,
 }
 
 impl InputQueue {
@@ -95,6 +97,23 @@ impl InputQueue {
     #[must_use]
     pub fn take(&mut self) -> Vec<Input> {
         take(&mut self.events)
+    }
+
+    /// Say that what is held can no longer be trusted.
+    ///
+    /// A viewer that loses focus mid-chord never sends the release: the operating system it runs
+    /// on takes the key and the viewer hears no more about it. The compositor would go on
+    /// believing that modifier is down for ever, and every chord after it would match wrongly.
+    /// This is the moment to let go of everything rather than guess which key was lost.
+    pub fn forget_held(&mut self) {
+        self.stale = true;
+        self.buttons = 0;
+    }
+
+    /// Whether what is held should be let go of.
+    #[must_use]
+    pub fn is_stale(&mut self) -> bool {
+        take(&mut self.stale)
     }
 
     /// Whether a transition was lost since this was last asked.

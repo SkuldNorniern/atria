@@ -153,6 +153,16 @@ impl VncSink {
     }
 
     /// Take what the viewer has done since this was last called.
+    /// Whether what the compositor believes is held should be let go of.
+    #[must_use]
+    pub fn stale_input(&self) -> bool {
+        self.latest
+            .input
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_stale()
+    }
+
     /// Whether input was lost since this was last called.
     ///
     /// True means a transition could not be queued, so what the compositor believes about held
@@ -281,7 +291,11 @@ impl Viewer {
         // forty milliseconds a frame, which is most of the latency.
         let _unused = stream.set_nodelay(true);
         match self.handshake(&mut stream) {
-            Ok(()) => Some(stream),
+            Ok(()) => {
+                // A new viewer holds nothing, whatever the last one left behind.
+                self.queue(InputQueue::forget_held);
+                Some(stream)
+            }
             Err(error) => {
                 eprintln!("atria-vnc: a viewer could not be served: {error}");
                 None
@@ -469,6 +483,9 @@ impl Viewer {
             }
             if number == client_message::FRAMEBUFFER_UPDATE_REQUEST && body[0] == 0 {
                 *asked_whole = true;
+                // A viewer asks for the whole frame when it is exposed or has just regained
+                // focus. Whatever it was holding when it lost focus, it is not holding now.
+                self.queue(InputQueue::forget_held);
             }
             if number == client_message::SET_PIXEL_FORMAT {
                 // Three bytes of padding, then the sixteen the format occupies.
