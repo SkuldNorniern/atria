@@ -32,4 +32,4 @@ pub use output::{
 };
 pub use registry::{ObjectRegistry, Teardown};
 pub use resolve::{HandleResolver, ResolveError, SharedMemory};
-pub use state::{CompositorState, ConnectionLimits, NegotiationError, ServerLimits};
+pub use state::{BufferSource, CompositorState, ConnectionLimits, NegotiationError, ServerLimits};

@@ -152,6 +152,19 @@ struct SurfaceState {
 struct BufferObject {
     descriptor: BufferDescriptor,
     state: BufferState,
+    /// Where the pixels are, for a buffer carved out of a pool.
+    ///
+    /// `None` for one imported as an inert descriptor by a backend that already resolved it.
+    /// Recorded so presentation can find the bytes without the compositor having mapped them.
+    source: Option<BufferSource>,
+}
+
+/// Where a buffer's pixels live: a region of memory a client handed over.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BufferSource {
+    pub memory: SharedMemory,
+    pub offset: u32,
+    pub descriptor: BufferDescriptor,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -490,6 +503,7 @@ impl CompositorState {
                     Object::Buffer(BufferObject {
                         descriptor,
                         state: BufferState::Available,
+                        source: None,
                     }),
                 )
             }
@@ -1425,8 +1439,32 @@ impl CompositorState {
             Object::Buffer(BufferObject {
                 descriptor,
                 state: BufferState::Available,
+                source: Some(BufferSource {
+                    memory,
+                    offset,
+                    descriptor,
+                }),
             }),
         )
+    }
+
+    /// Where a buffer's pixels are, for a caller about to read them.
+    #[must_use]
+    pub fn buffer_source(
+        &self,
+        connection: ConnectionId,
+        buffer: ObjectId,
+    ) -> Option<BufferSource> {
+        let entry = self
+            .connections
+            .get(&connection)?
+            .registry
+            .entry(buffer)
+            .ok()?;
+        match &entry.value {
+            Object::Buffer(object) => object.source,
+            _ => None,
+        }
     }
 
     fn expect_active_session(
