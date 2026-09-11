@@ -408,16 +408,21 @@ impl Operation {
             Self::TextInputCommit => spec(I::TextInput, Event, 3, "commit", &[String]),
             Self::TextInputDone => spec(I::TextInput, Event, 4, "done", &[U32]),
 
+            // Every message names the composition it belongs to. One that has ended is refused
+            // rather than applied: a commit arriving after focus moved would otherwise land in
+            // whatever window is there now.
             Self::InputMethodSetPreedit => spec(
                 I::InputMethod,
                 Method,
                 0,
                 "set_preedit",
-                &[String, I32, I32],
+                &[U32, String, I32, I32],
             ),
-            Self::InputMethodCommit => spec(I::InputMethod, Method, 1, "commit", &[String]),
-            Self::InputMethodDone => spec(I::InputMethod, Method, 2, "done", &[U32]),
-            Self::InputMethodActivate => spec(I::InputMethod, Event, 0, "activate", &[Object, U32]),
+            Self::InputMethodCommit => spec(I::InputMethod, Method, 1, "commit", &[U32, String]),
+            Self::InputMethodDone => spec(I::InputMethod, Method, 2, "done", &[U32, U32]),
+            Self::InputMethodActivate => {
+                spec(I::InputMethod, Event, 0, "activate", &[Object, U32, U32])
+            }
             Self::InputMethodDeactivate => spec(I::InputMethod, Event, 1, "deactivate", &[]),
             // Keys reach the input method while it is composing, and the focused client does not
             // see them until the method says what they became.

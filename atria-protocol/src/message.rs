@@ -1723,6 +1723,8 @@ impl TextPurpose {
 /// replaced wholesale by the next preedit: it is a proposal, not an edit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Preedit<'a> {
+    /// The composition this belongs to. One that has ended is refused, not applied.
+    pub composition: u32,
     pub text: &'a str,
     pub cursor_begin: i32,
     pub cursor_end: i32,
@@ -1735,11 +1737,13 @@ impl<'a> Preedit<'a> {
     /// is longer than [`MAX_TEXT_BYTES`].
     pub fn decode(input: &'a [u8]) -> Result<Self, DecodeError> {
         let mut decoder = Decoder::new(input);
+        let composition = decoder.read_u32()?;
         let text = decoder.read_string()?;
         if text.len() > MAX_TEXT_BYTES {
             return Err(DecodeError::SizeOverflow);
         }
         let value = Self {
+            composition,
             text,
             cursor_begin: decoder.read_i32()?,
             cursor_end: decoder.read_i32()?,
@@ -1752,11 +1756,12 @@ impl<'a> Preedit<'a> {
 impl EncodePayload for Preedit<'_> {
     fn encoded_len(&self) -> Result<usize, EncodeError> {
         encoded_string_len(self.text)?
-            .checked_add(8)
+            .checked_add(12)
             .ok_or(EncodeError::SizeOverflow)
     }
 
     fn encode(&self, encoder: &mut Encoder<'_>) -> Result<(), EncodeError> {
+        encoder.write_u32(self.composition)?;
         encoder.write_string(self.text)?;
         encoder.write_i32(self.cursor_begin)?;
         encoder.write_i32(self.cursor_end)
@@ -1766,6 +1771,8 @@ impl EncodePayload for Preedit<'_> {
 /// Text that is text: no longer a proposal, and the field should keep it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CommitText<'a> {
+    /// The composition this belongs to.
+    pub composition: u32,
     pub text: &'a str,
 }
 
@@ -1775,21 +1782,25 @@ impl<'a> CommitText<'a> {
     /// Returns [`DecodeError`] when the payload is not a string, or the text is too long.
     pub fn decode(input: &'a [u8]) -> Result<Self, DecodeError> {
         let mut decoder = Decoder::new(input);
+        let composition = decoder.read_u32()?;
         let text = decoder.read_string()?;
         if text.len() > MAX_TEXT_BYTES {
             return Err(DecodeError::SizeOverflow);
         }
         decoder.finish()?;
-        Ok(Self { text })
+        Ok(Self { composition, text })
     }
 }
 
 impl EncodePayload for CommitText<'_> {
     fn encoded_len(&self) -> Result<usize, EncodeError> {
-        encoded_string_len(self.text)
+        encoded_string_len(self.text)?
+            .checked_add(4)
+            .ok_or(EncodeError::SizeOverflow)
     }
 
     fn encode(&self, encoder: &mut Encoder<'_>) -> Result<(), EncodeError> {
+        encoder.write_u32(self.composition)?;
         encoder.write_string(self.text)
     }
 }
@@ -1838,6 +1849,8 @@ impl EncodePayload for CursorArea {
 pub struct InputMethodActivation {
     pub surface: ObjectId,
     pub purpose: u32,
+    /// The composition being started. Everything the method says must quote it back.
+    pub composition: u32,
 }
 
 impl InputMethodActivation {
@@ -1849,6 +1862,7 @@ impl InputMethodActivation {
         let value = Self {
             surface: ObjectId::from_raw(decoder.read_u32()?),
             purpose: decoder.read_u32()?,
+            composition: decoder.read_u32()?,
         };
         decoder.finish()?;
         Ok(value)
@@ -1857,11 +1871,45 @@ impl InputMethodActivation {
 
 impl EncodePayload for InputMethodActivation {
     fn encoded_len(&self) -> Result<usize, EncodeError> {
-        Ok(8)
+        Ok(12)
     }
 
     fn encode(&self, encoder: &mut Encoder<'_>) -> Result<(), EncodeError> {
         encoder.write_u32(self.surface.into_raw())?;
-        encoder.write_u32(self.purpose)
+        encoder.write_u32(self.purpose)?;
+        encoder.write_u32(self.composition)
+    }
+}
+
+/// Two numbers a method quotes back: the composition, and its own serial for the round.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CompositionRound {
+    pub composition: u32,
+    pub serial: u32,
+}
+
+impl CompositionRound {
+    /// # Errors
+    ///
+    /// Returns [`DecodeError`] when the payload is not two numbers.
+    pub fn decode(input: &[u8]) -> Result<Self, DecodeError> {
+        let mut decoder = Decoder::new(input);
+        let value = Self {
+            composition: decoder.read_u32()?,
+            serial: decoder.read_u32()?,
+        };
+        decoder.finish()?;
+        Ok(value)
+    }
+}
+
+impl EncodePayload for CompositionRound {
+    fn encoded_len(&self) -> Result<usize, EncodeError> {
+        Ok(8)
+    }
+
+    fn encode(&self, encoder: &mut Encoder<'_>) -> Result<(), EncodeError> {
+        encoder.write_u32(self.composition)?;
+        encoder.write_u32(self.serial)
     }
 }

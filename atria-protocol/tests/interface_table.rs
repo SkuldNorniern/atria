@@ -175,8 +175,8 @@ fn the_documented_sizes_are_the_computed_sizes() {
         (Operation::TextInputEnter, 0x10),
         (Operation::TextInputLeave, 0x10),
         (Operation::TextInputDone, 0x10),
-        (Operation::InputMethodDone, 0x10),
-        (Operation::InputMethodActivate, 0x14),
+        (Operation::InputMethodDone, 0x14),
+        (Operation::InputMethodActivate, 0x18),
         (Operation::InputMethodDeactivate, 0x0c),
         (Operation::InputMethodKey, 0x24),
     ];
