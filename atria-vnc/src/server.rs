@@ -276,6 +276,9 @@ impl Viewer {
     }
 }
 
+/// The most cut text this server will read from a viewer before dropping it.
+const MAX_CUT_TEXT: usize = 1 << 20;
+
 /// How many distinct unplaced keysyms are named before the rest are passed over in silence.
 const MAX_REPORTED_KEYSYMS: usize = 64;
 
@@ -514,8 +517,10 @@ impl Viewer {
                 let mut head = [0_u8; 7];
                 stream.read_exact(&mut head)?;
                 let length = u32::from_be_bytes([head[3], head[4], head[5], head[6]]) as usize;
-                let mut body = vec![0_u8; length];
-                stream.read_exact(&mut body)
+                // Discarded in fixed-size pieces rather than allocated. The length is a
+                // four-byte number from an unauthenticated socket: believing it would let one
+                // eight-byte message ask this server for four gigabytes.
+                discard(stream, length)
             }
             // An unknown message number cannot be skipped, because its length is unknown, so the
             // connection is the only thing that can be resynchronised. Named rather than silent:
@@ -527,6 +532,27 @@ impl Viewer {
             )),
         }
     }
+}
+
+/// Read and throw away `length` bytes, without allocating for them.
+///
+/// Past what a clipboard could plausibly hold the connection is dropped instead: staying in step
+/// with a viewer sending gigabytes is not worth the time it would take to read them.
+fn discard(stream: &mut TcpStream, length: usize) -> io::Result<()> {
+    if length > MAX_CUT_TEXT {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "the viewer offered more cut text than this server will read",
+        ));
+    }
+    let mut piece = [0_u8; 4096];
+    let mut left = length;
+    while left > 0 {
+        let want = left.min(piece.len());
+        stream.read_exact(&mut piece[..want])?;
+        left -= want;
+    }
+    Ok(())
 }
 
 /// Say why a viewer was dropped. Losing one silently is indistinguishable from a blank screen.
