@@ -24,9 +24,10 @@ use atria_compositor::{
 };
 use atria_protocol::ObjectId;
 use atria_protocol::capability::{Capability, CapabilitySet};
+use atria_protocol::key::PhysicalKey;
 use atria_software_output::PixelLayout;
 use atria_transport::UnixTransport;
-use atria_vnc::VncSink;
+use atria_vnc::{Input, VncSink};
 use atriad::{Presenter, Session, SessionError, compositor, present_all, software_capabilities};
 
 /// The session the server establishes for each connection.
@@ -254,20 +255,28 @@ fn run() -> io::Result<()> {
         let mut dispatched = false;
         if let Some(sink) = viewer.as_ref() {
             for report in sink.take_input() {
-                let moved = Point {
-                    x: report.x,
-                    y: report.y,
-                };
                 clock = clock.saturating_add(1);
-                state.move_pointer(moved, clock);
-                // One bit per button. Only a change is an event: a report is the whole state of
-                // the pointer, and resending a press that is already down would be a second
-                // press.
-                let primary = report.buttons & 1 != 0;
-                if primary != pressed {
-                    pressed = primary;
-                    clock = clock.saturating_add(1);
-                    state.pointer_button(PRIMARY_BUTTON, primary, clock);
+                match report {
+                    Input::Pointer(moved) => {
+                        state.move_pointer(
+                            Point {
+                                x: moved.x,
+                                y: moved.y,
+                            },
+                            clock,
+                        );
+                        // A report is the whole state of the pointer, so only a change is an
+                        // event. Resending a press already down would be a second press.
+                        let primary = moved.buttons & 1 != 0;
+                        if primary != pressed {
+                            pressed = primary;
+                            clock = clock.saturating_add(1);
+                            state.pointer_button(PRIMARY_BUTTON, primary, clock);
+                        }
+                    }
+                    Input::Key(key) => {
+                        state.key(PhysicalKey::from_usage(key.usage), key.pressed, clock);
+                    }
                 }
                 dispatched = true;
             }
