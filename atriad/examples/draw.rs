@@ -16,7 +16,7 @@ use atria_compositor::FORMAT_XRGB8888;
 use atria_protocol::interface::{Interface, Operation};
 use atria_protocol::message::{
     Attach, Bind, Commit, CreateBuffer, CreatePool, DamageBuffer, EncodePayload, GetToplevel,
-    NewId, RegistryGlobal, SetTitle, encode_message,
+    KeyboardKey, NewId, RegistryGlobal, SetTitle, encode_message,
 };
 use atria_protocol::wire::{Frame, HandleIndex, HandleKind, MAX_MESSAGE_SIZE};
 use atria_protocol::{ObjectId, Opcode};
@@ -36,6 +36,11 @@ const BUFFER: u32 = 6;
 const SURFACE: u32 = 7;
 const SHELL: u32 = 8;
 const TOPLEVEL: u32 = 12;
+const SEAT: u32 = 13;
+const KEYBOARD: u32 = 14;
+
+/// How far each keypress turns the window's colour.
+const HUE_STEP: u8 = 0x29;
 
 fn id(raw: u32) -> ObjectId {
     ObjectId::from_raw(raw)
@@ -68,6 +73,7 @@ fn main() {
     let compositor_name = client.global_named(Interface::Compositor);
     let shm_name = client.global_named(Interface::Shm);
     let shell_name = client.global_named(Interface::Shell);
+    let seat_name = client.global_named(Interface::Seat);
 
     client.request(
         id(REGISTRY),
@@ -98,10 +104,27 @@ fn main() {
         },
     );
 
+    client.request(
+        id(REGISTRY),
+        Operation::RegistryBind,
+        &Bind {
+            name: seat_name,
+            version: 1,
+            new_id: id(SEAT),
+        },
+    );
+    client.request(
+        id(SEAT),
+        Operation::SeatGetKeyboard,
+        &NewId {
+            new_id: id(KEYBOARD),
+        },
+    );
+
     let stride = width * BYTES_PER_PIXEL;
-    let bytes = (stride * height) as usize;
-    let region = memory(bytes);
-    let mut pixels = Vec::with_capacity(bytes);
+    let bytes_of_pixels = (stride * height) as usize;
+    let region = memory(bytes_of_pixels);
+    let mut pixels = Vec::with_capacity(bytes_of_pixels);
     for _ in 0..(width * height) {
         pixels.extend_from_slice(&colour);
     }
@@ -113,7 +136,7 @@ fn main() {
         &CreatePool {
             new_id: id(POOL),
             memory: HandleIndex::new(0, HandleKind::SharedMemory),
-            size: bytes as u32,
+            size: bytes_of_pixels as u32,
         },
         &region,
     );
@@ -184,22 +207,70 @@ fn main() {
 
     // Held open deliberately. A connection that closes takes its buffers with it, and there
     // would be nothing left to look at.
+    // Repaint on every keypress, so typing is visible rather than merely delivered.
+    let mut turned = 0_u8;
     loop {
         let Ok(mut envelope) = client.transport.receive() else {
             return;
         };
         let bytes = envelope.take_bytes();
-        // An opcode is local to its interface, so which object a message names is what says
-        // what it is. Only the display reports errors.
-        if let Ok(frame) = Frame::decode(&bytes)
-            && frame.header.object_id == ObjectId::DISPLAY
+        let Ok(frame) = Frame::decode(&bytes) else {
+            continue;
+        };
+        // An opcode is local to its interface, so the object a message names says what it is.
+        if frame.header.object_id == ObjectId::DISPLAY
             && frame.header.opcode.into_raw() == Operation::DisplayError.opcode()
         {
             eprintln!(
                 "draw: the compositor refused something: {:?}",
                 frame.payload
             );
+            continue;
         }
+        if frame.header.object_id != id(KEYBOARD)
+            || frame.header.opcode.into_raw() != Operation::KeyboardKey.opcode()
+        {
+            continue;
+        }
+        let Ok(key) = KeyboardKey::decode(frame.payload) else {
+            continue;
+        };
+        if key.state == 0 {
+            continue;
+        }
+        turned = turned.wrapping_add(HUE_STEP);
+        let shifted = [
+            colour[0].wrapping_add(turned),
+            colour[1].wrapping_add(turned.wrapping_mul(2)),
+            colour[2].wrapping_sub(turned),
+            0xff,
+        ];
+        let repainted: Vec<u8> = shifted
+            .iter()
+            .copied()
+            .cycle()
+            .take(bytes_of_pixels)
+            .collect();
+        write_at(&region, 0, &repainted);
+        println!("draw: key {:#04x} repainted the window", key.key);
+        client.request(
+            id(SURFACE),
+            Operation::SurfaceDamageBuffer,
+            &DamageBuffer {
+                x: 0,
+                y: 0,
+                width,
+                height,
+            },
+        );
+        client.request(
+            id(SURFACE),
+            Operation::SurfaceCommit,
+            &Commit {
+                commit_id: 2,
+                configure_serial: 0,
+            },
+        );
     }
 }
 
