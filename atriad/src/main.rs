@@ -19,7 +19,8 @@ use libc::{
 };
 
 use atria_compositor::{
-    CompositorState, ConnectionId, ConnectionLimits, ObjectKind, ServerLimits, Size, StateError,
+    CompositorState, ConnectionId, ConnectionLimits, IdentitySource, ObjectKind, OutputIdentity,
+    OutputInfo, Point, ServerLimits, Size, StateError,
 };
 use atria_protocol::ObjectId;
 use atria_protocol::capability::CapabilitySet;
@@ -36,9 +37,18 @@ const SESSION_ID: u32 = 9;
 /// The version each global is advertised at. One, because none of them has a second yet.
 const VERSION: u32 = 1;
 
-/// The output this server composes for, until a real display backend chooses it.
+/// The output this server composes for, until a display backend reports a real one.
+///
+/// Described as a display rather than assumed as a size: clients bind it, learn its mode and
+/// scale, and a shell can arrange against it. When a backend arrives it reports a different
+/// topology through the same call and nothing above this changes.
 const OUTPUT_WIDTH: u32 = 1280;
 const OUTPUT_HEIGHT: u32 = 720;
+const OUTPUT_REFRESH_MILLIHERTZ: u32 = 60_000;
+const OUTPUT_MILLIMETRES: Size = Size {
+    width: 340,
+    height: 190,
+};
 
 fn main() -> ExitCode {
     match run() {
@@ -92,6 +102,33 @@ fn run() -> io::Result<()> {
             return Err(io::Error::other("a global could not be advertised"));
         }
     }
+
+    // The software output, reported as a topology so it reaches clients the way a real display
+    // will. Its identity comes from the connector it stands for, because nothing here has a panel
+    // asserting one of its own.
+    let identity = OutputIdentity(1);
+    let delta = state.apply_topology(
+        &[(
+            identity,
+            IdentitySource::Position,
+            OutputInfo {
+                size: Size {
+                    width: OUTPUT_WIDTH,
+                    height: OUTPUT_HEIGHT,
+                },
+                physical_millimetres: OUTPUT_MILLIMETRES,
+                scale_numerator: 1,
+                scale_denominator: 1,
+                refresh_millihertz: OUTPUT_REFRESH_MILLIHERTZ,
+            },
+        )],
+        VERSION,
+    );
+    if delta.arrived.len() != 1 {
+        return Err(io::Error::other("the output could not be advertised"));
+    }
+    state.place_output(identity, Point { x: 0, y: 0 });
+    println!("atriad: one output, {OUTPUT_WIDTH}x{OUTPUT_HEIGHT}");
 
     let mut sessions: Vec<Session<UnixTransport>> = Vec::new();
     let mut composed = 0_u64;
