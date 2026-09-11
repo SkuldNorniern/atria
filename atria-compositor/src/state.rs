@@ -1132,7 +1132,14 @@ impl CompositorState {
     ) -> Result<(), StateError> {
         self.surface(surface.connection, surface.object_id)?;
         self.scene.positions.insert(surface, position);
-        if !self.scene.stack.contains(&surface) {
+        // Placing says where, not whether. Content is what puts a surface in the scene, so a
+        // shell may place a window the moment it hears about one — before its client has drawn
+        // anything — and the position is waiting when the first frame arrives.
+        if self
+            .surface_snapshot(surface.connection, surface.object_id)
+            .is_some()
+            && !self.scene.stack.contains(&surface)
+        {
             self.scene.stack.push(surface);
         }
         Ok(())
@@ -1140,6 +1147,15 @@ impl CompositorState {
 
     pub fn raise_surface(&mut self, surface: SurfaceKey) -> Result<(), StateError> {
         self.surface(surface.connection, surface.object_id)?;
+        // Raising says where in the order, not whether it is in the scene at all. A window that
+        // has drawn nothing has nothing to raise above anything, and putting it in the scene here
+        // would be asking the next composition to draw a window with no pixels.
+        if self
+            .surface_snapshot(surface.connection, surface.object_id)
+            .is_none()
+        {
+            return Ok(());
+        }
         self.scene.stack.retain(|value| *value != surface);
         self.scene.stack.push(surface);
         Ok(())

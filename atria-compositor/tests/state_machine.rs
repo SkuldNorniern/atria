@@ -994,3 +994,56 @@ fn the_scene_never_names_anything_the_compositor_has_let_go() {
     );
     assert!(state.stacking_order().is_empty());
 }
+
+/// A shell may place a window before its client has drawn anything.
+///
+/// A shell hears about a window when it takes its role, which is before the first commit. If
+/// placing put the surface in the scene, the very next composition would be asked to draw a
+/// window with no pixels — and the shell would have to know to wait, which is the compositor's
+/// business and not its.
+#[test]
+fn placing_a_window_before_it_draws_leaves_the_scene_consistent() {
+    let mut state = state_with_limits(ConnectionLimits::default());
+    let client = connect(&mut state);
+    create_session(&mut state, client, 9);
+    create_surface(&mut state, client, 257);
+
+    let key = SurfaceKey {
+        connection: client,
+        object_id: id(257),
+    };
+    state
+        .place_surface(key, Point { x: 40, y: 25 })
+        .unwrap_or_else(|error| panic!("a placement is accepted: {error:?}"));
+    assert!(
+        state.stacking_order().is_empty(),
+        "a window with nothing to show is not in the scene, however early it was placed"
+    );
+    assert_eq!(
+        state.scene_faults(),
+        Ok(()),
+        "and the scene does not disagree with itself in the meantime"
+    );
+
+    state
+        .raise_surface(key)
+        .unwrap_or_else(|error| panic!("a raise is accepted too: {error:?}"));
+    assert!(
+        state.stacking_order().is_empty(),
+        "and neither does raising it, for the same reason"
+    );
+    assert_eq!(state.scene_faults(), Ok(()));
+
+    import_buffer(&mut state, client, 300);
+    attach_and_commit(&mut state, client, 257, 300);
+    assert_eq!(
+        state.stacking_order(),
+        [key],
+        "drawing is what puts it in the scene"
+    );
+    assert_eq!(
+        state.surface_position(key),
+        Some(Point { x: 40, y: 25 }),
+        "and the place the shell chose was waiting for it"
+    );
+}
