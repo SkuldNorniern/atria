@@ -13,7 +13,7 @@ use alloc::string::String;
 
 use atria_protocol::ObjectId;
 
-use crate::model::{ConnectionId, Size};
+use crate::model::{ConnectionId, SeatId, Size};
 
 /// A window, as a shell refers to it.
 ///
@@ -51,4 +51,6 @@ pub enum ShellError {
     NotGranted,
     /// No window answers to this handle. It was retired, or never existed.
     UnknownHandle { handle: ToplevelHandle },
+    /// No seat answers to this name.
+    UnknownSeat { seat: SeatId },
 }

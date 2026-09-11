@@ -723,3 +723,22 @@ fn a_shell_is_told_when_a_clients_death_takes_its_windows() {
         "and the compositor no longer holds it either"
     );
 }
+
+/// A seat this compositor does not have is refused rather than quietly taken as the one it does.
+#[test]
+fn naming_a_seat_that_does_not_exist_is_refused() {
+    let mut state = server();
+    let (_, window) = application(&mut state, "ledger");
+    let shell = shell(&mut state);
+
+    assert_eq!(
+        state.shell_focus(shell, SeatId(9), window),
+        Err(ShellError::UnknownSeat { seat: SeatId(9) }),
+        "with one seat, a request naming another is about something that is not there"
+    );
+    assert_ne!(
+        state.shell_focus(shell, SeatId(1), window),
+        Err(ShellError::UnknownSeat { seat: SeatId(1) }),
+        "and the seat that does exist is not refused for its name"
+    );
+}
