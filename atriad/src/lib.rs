@@ -11,7 +11,7 @@
 mod present;
 mod session;
 
-pub use present::{PresentFailure, Presenter, present_for};
+pub use present::{PresentFailure, Presenter, present_committed, present_for};
 pub use session::{Served, Session, SessionError};
 
 use atria_compositor::{CompositorState, ConnectionLimits, ServerLimits};

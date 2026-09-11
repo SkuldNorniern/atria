@@ -107,6 +107,44 @@ impl Presenter {
     }
 }
 
+/// Stage everything a connection has committed, composite it, and deliver what that produced.
+///
+/// Only this connection's surfaces are staged, because a buffer is read through the session that
+/// owns it. That is the single-client shape the server currently has, not a protocol limit.
+///
+/// # Errors
+///
+/// Returns [`PresentFailure`] when a buffer cannot be read or the frame cannot be composed.
+pub fn present_committed(
+    presenter: &mut Presenter,
+    state: &mut CompositorState,
+    session: &mut Session,
+    timestamp_ns: u64,
+    sink: &mut impl FrameSink,
+) -> Result<FrameReport, PresentFailure> {
+    let connection = session.connection();
+    let surfaces: Vec<_> = state
+        .stacking_order()
+        .iter()
+        .copied()
+        .filter(|key| key.connection == connection)
+        .collect();
+
+    for surface in surfaces {
+        let Some(buffer) = state
+            .surface_snapshot(surface.connection, surface.object_id)
+            .map(|snapshot| snapshot.buffer)
+        else {
+            continue;
+        };
+        presenter.stage(state, connection, session.memory(), buffer)?;
+    }
+
+    let report = presenter.present(state, timestamp_ns, sink)?;
+    let _ = session.deliver(state);
+    Ok(report)
+}
+
 /// Stage and present one client's committed content, then deliver whatever that produced.
 ///
 /// # Errors

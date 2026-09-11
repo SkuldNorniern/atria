@@ -11,6 +11,7 @@ atria-compositor = { path = "../atria-compositor" }
 atria-protocol = { path = "../atria-protocol" }
 atria-software-output = { path = "../atria-software-output" }
 atria-transport = { path = "../atria-transport" }
+atria-vnc = { path = "../atria-vnc" }
 libc = "0.2"
 
 [dev-dependencies]

@@ -18,12 +18,16 @@ use libc::{
 };
 
 use atria_compositor::{
-    CompositorState, ConnectionId, ConnectionLimits, ObjectKind, ServerLimits, StateError,
+    CompositorState, ConnectionId, ConnectionLimits, ObjectKind, ServerLimits, Size, StateError,
 };
 use atria_protocol::ObjectId;
 use atria_protocol::capability::CapabilitySet;
+use atria_software_output::PixelLayout;
 use atria_transport::UnixTransport;
-use atriad::{Session, SessionError, compositor, software_capabilities};
+use atria_vnc::VncSink;
+use atriad::{
+    Presenter, Session, SessionError, compositor, present_committed, software_capabilities,
+};
 
 /// The session the server establishes for each connection.
 ///
@@ -32,6 +36,10 @@ const SESSION_ID: u32 = 9;
 
 /// The version each global is advertised at. One, because none of them has a second yet.
 const VERSION: u32 = 1;
+
+/// The output this server composes for, until a real display backend chooses it.
+const OUTPUT_WIDTH: u32 = 1280;
+const OUTPUT_HEIGHT: u32 = 720;
 
 fn main() -> ExitCode {
     match run() {
@@ -45,12 +53,36 @@ fn main() -> ExitCode {
 
 fn run() -> io::Result<()> {
     let path = args().nth(1).unwrap_or_else(|| {
-        eprintln!("atriad: usage: atriad <socket-path>");
+        eprintln!("atriad: usage: atriad <socket-path> [--vnc <address>]");
         exit(2);
     });
+    let watching = args().skip_while(|argument| argument != "--vnc").nth(1);
 
     let listener = listen(&path)?;
     println!("atriad: listening on {path}");
+
+    let layout = PixelLayout::new(4).map_err(|_| io::Error::other("four bytes a pixel"))?;
+    let mut presenter = Presenter::new(
+        Size {
+            width: OUTPUT_WIDTH,
+            height: OUTPUT_HEIGHT,
+        },
+        layout,
+    )
+    .map_err(|_| io::Error::other("the output size is unusable"))?;
+
+    // Bound whether or not anyone is watching, and presentation does not wait for them: a
+    // compositor that behaved differently while being observed would be useless for confirming
+    // how it behaves.
+    let mut viewer = match watching {
+        Some(address) => {
+            let sink = VncSink::bind(&address, OUTPUT_WIDTH as u16, OUTPUT_HEIGHT as u16, "Atria")
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            println!("atriad: a viewer may connect to {address}");
+            Some(sink)
+        }
+        None => None,
+    };
 
     let mut state = compositor(ServerLimits::default(), ConnectionLimits::default());
 
@@ -84,7 +116,24 @@ fn run() -> io::Result<()> {
         println!("atriad: client connected");
         loop {
             match session.serve_one(&mut state) {
-                Ok(_) => {}
+                Ok(served) => {
+                    if served.dispatched
+                        && let Some(sink) = viewer.as_mut()
+                    {
+                        // Composed after every accepted request rather than on a clock: there is
+                        // no measured deadline to pace against yet, and inventing one would be
+                        // a timing claim with nothing behind it.
+                        if let Err(error) = present_committed(
+                            &mut presenter,
+                            &mut state,
+                            &mut session,
+                            0,
+                            &mut *sink,
+                        ) {
+                            eprintln!("atriad: could not compose: {error:?}");
+                        }
+                    }
+                }
                 Err(SessionError::Closed) => break,
                 Err(SessionError::Transport(error)) => {
                     eprintln!("atriad: transport failed: {error}");
