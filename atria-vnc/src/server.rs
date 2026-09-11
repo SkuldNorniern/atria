@@ -3,7 +3,6 @@
 use std::error::Error;
 use std::fmt;
 use std::io::{self, ErrorKind, Read, Write};
-use std::mem::take;
 use std::net::{TcpListener, TcpStream};
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
@@ -13,6 +12,7 @@ use std::time::Duration;
 
 use atria_software_output::{Frame, FrameReport, FrameSink, SinkError};
 
+use crate::input::{Input, InputQueue};
 use crate::protocol::{
     PixelFormat, SECURITY_NONE, VERSION, changed_regions, client_message, client_message_length,
     encoding, pixel_format, read_exact, usage_of_keysym, write_update,
@@ -66,45 +66,18 @@ impl Error for VncError {
 /// frame that has been superseded has no value: showing it would be showing something that is no
 /// longer true. The serial is what lets a viewer tell "nothing new yet" from "the same pixels
 /// again".
-/// What a viewer did with its pointer.
+/// The most recently composed frame, and a count of how many have been composed.
 ///
-/// The viewer is a real input source, not only a window onto the output. Coordinates are the
-/// output's, because that is what a remote framebuffer protocol speaks in; turning them into a
-/// surface's own coordinates is the compositor's job and not this package's.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PointerInput {
-    pub x: i32,
-    pub y: i32,
-    /// One bit per button, as RFB carries them. Bit zero is the primary button.
-    pub buttons: u8,
-}
-
-/// A key the viewer pressed or released, by physical position.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct KeyInput {
-    /// A USB HID Keyboard/Keypad usage.
-    pub usage: u32,
-    pub pressed: bool,
-}
-
-/// What a viewer did.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Input {
-    Pointer(PointerInput),
-    Key(KeyInput),
-}
-
+/// One frame is kept, not a queue. A remote viewer wants the current state of the output, so a
+/// frame that has been superseded has no value: showing it would be showing something that is no
+/// longer true. The serial is what lets a viewer tell "nothing new yet" from "the same pixels
+/// again".
 #[derive(Default)]
 struct Latest {
     frame: Mutex<(u64, Vec<u8>)>,
     composed: Condvar,
-    /// What the viewer has done since anyone last looked. Bounded: a viewer faster than the
-    /// compositor reads loses the oldest, rather than making the compositor's memory its own.
-    input: Mutex<Vec<Input>>,
+    input: Mutex<InputQueue>,
 }
-
-/// How many pointer reports are kept between reads.
-const MAX_PENDING_INPUT: usize = 256;
 
 /// A sink that shows the composed output to one connected viewer.
 ///
@@ -177,18 +150,32 @@ impl VncSink {
     }
 
     /// Take what the viewer has done since this was last called.
+    /// Whether input was lost since this was last called.
+    ///
+    /// True means a transition could not be queued, so what the compositor believes about held
+    /// keys and buttons no longer matches the device. The answer is a new routing epoch, not a
+    /// guess at what was missed.
+    #[must_use]
+    pub fn overflowed(&self) -> bool {
+        self.latest
+            .input
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .overflowed()
+    }
+
+    /// Take what the viewer has done since this was last called.
     #[must_use]
     pub fn take_input(&self) -> Vec<Input> {
         // Drain whatever woke us, so the descriptor stops being readable until the next report.
         let mut discard = [0_u8; 64];
         while (&self.waker).read(&mut discard).is_ok_and(|read| read > 0) {}
 
-        let mut held = self
-            .latest
+        self.latest
             .input
             .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        take(&mut *held)
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
     }
 }
 
@@ -385,36 +372,29 @@ impl Viewer {
         outcome
     }
 
-    /// Record what a `PointerEvent` said, dropping the oldest when the bound is reached.
+    /// Hand a `PointerEvent` body to the queue.
     fn record_pointer(&self, body: &[u8]) {
-        // Button mask, then x and y, big-endian, as RFB 3.8 defines the message.
-        let buttons = body[0];
-        let x = i32::from(u16::from_be_bytes([body[1], body[2]]));
-        let y = i32::from(u16::from_be_bytes([body[3], body[4]]));
-        self.record(Input::Pointer(PointerInput { x, y, buttons }));
+        self.queue(|queue| queue.pointer(body));
     }
 
-    /// Record what a `KeyEvent` said, if the key is one this server can name.
+    /// Hand a `KeyEvent` to the queue, if the key is one this server can place.
     fn record_key(&self, body: &[u8]) {
         let pressed = body[0] != 0;
         let keysym = u32::from_be_bytes([body[3], body[4], body[5], body[6]]);
         let Some(usage) = usage_of_keysym(keysym) else {
             return;
         };
-        self.record(Input::Key(KeyInput { usage, pressed }));
+        self.queue(|queue| queue.key(usage, pressed));
     }
 
-    fn record(&self, input: Input) {
-        let mut held = self
+    fn queue(&self, act: impl FnOnce(&mut InputQueue)) {
+        let mut queue = self
             .latest
             .input
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if held.len() >= MAX_PENDING_INPUT {
-            held.remove(0);
-        }
-        held.push(input);
-        drop(held);
+        act(&mut queue);
+        drop(queue);
         let _unused = (&self.waker).write(&[1]);
     }
 
