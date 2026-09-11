@@ -1,8 +1,16 @@
 //! What a desktop needs from its displays, and what most systems get wrong.
 
 use atria_compositor::{
-    IdentitySource, MAX_SCALE_TERM, OutputIdentity, OutputInfo, OutputSet, Point, Rect, Size,
+    ClientRequest, CompositorState, ConnectionLimits, EventKind, IdentitySource, MAX_SCALE_TERM,
+    OutputIdentity, OutputInfo, OutputSet, Point, Rect, ServerLimits, Size,
 };
+use atria_protocol::ObjectId;
+use atria_protocol::capability::CapabilitySet;
+use atria_protocol::interface::Interface;
+
+fn id(raw: u32) -> ObjectId {
+    ObjectId::from_raw(raw)
+}
 
 fn identity(raw: u128) -> OutputIdentity {
     OutputIdentity(raw)
@@ -206,4 +214,131 @@ fn a_scale_must_be_an_exact_ratio_in_lowest_terms() {
             "{numerator}/{denominator} must be refused"
         );
     }
+}
+
+#[test]
+fn a_display_is_a_global_a_client_binds_and_is_described_once() {
+    let mut state = CompositorState::new(
+        CapabilitySet::empty(),
+        ServerLimits::default(),
+        ConnectionLimits::default(),
+    );
+    let client = state
+        .connect(CapabilitySet::empty(), CapabilitySet::empty())
+        .expect("the connection is admitted");
+
+    let delta = state.apply_topology(&[(identity(1), IdentitySource::Panel, info(2560, 1440))], 1);
+    assert_eq!(delta.arrived.len(), 1);
+    state.place_output(identity(1), Point { x: 0, y: 0 });
+
+    state
+        .dispatch(client, ClientRequest::CreateRegistry { new_id: id(2) })
+        .expect("a registry");
+    let announced: Vec<_> = state
+        .take_events()
+        .into_iter()
+        .filter_map(|event| match event.kind {
+            EventKind::Global {
+                name, interface, ..
+            } => Some((name, interface)),
+            _ => None,
+        })
+        .collect();
+    let output = announced
+        .iter()
+        .find(|(_, interface)| *interface == Interface::Output)
+        .map(|(name, _)| *name)
+        .expect("the display is announced as a global like anything else");
+
+    state
+        .dispatch(
+            client,
+            ClientRequest::Bind {
+                name: output,
+                version: 1,
+                new_id: id(3),
+            },
+        )
+        .expect("the client binds the display");
+
+    let described: Vec<_> = state
+        .take_events()
+        .into_iter()
+        .filter(|event| event.object_id == id(3))
+        .map(|event| event.kind)
+        .collect();
+
+    assert_eq!(
+        described,
+        vec![
+            EventKind::OutputIdentity { identity: 1 },
+            EventKind::OutputGeometry {
+                position: Point { x: 0, y: 0 },
+                physical_millimetres: Size {
+                    width: 600,
+                    height: 340
+                },
+                identity_source: IdentitySource::Panel,
+            },
+            EventKind::OutputMode {
+                size: Size {
+                    width: 2560,
+                    height: 1440
+                },
+                refresh_millihertz: 60_000,
+            },
+            EventKind::OutputScale {
+                numerator: 1,
+                denominator: 1,
+            },
+            EventKind::OutputDone,
+        ],
+        "a bound display describes itself whole, and says where the description ends"
+    );
+}
+
+#[test]
+fn a_display_departing_withdraws_the_global_it_was_offered_as() {
+    let mut state = CompositorState::new(
+        CapabilitySet::empty(),
+        ServerLimits::default(),
+        ConnectionLimits::default(),
+    );
+    let client = state
+        .connect(CapabilitySet::empty(), CapabilitySet::empty())
+        .expect("the connection is admitted");
+    state
+        .dispatch(client, ClientRequest::CreateRegistry { new_id: id(2) })
+        .expect("a registry");
+
+    state.apply_topology(&[(identity(1), IdentitySource::Panel, info(1920, 1080))], 1);
+    let _ = state.take_events();
+
+    state.apply_topology(&[], 1);
+    let withdrawn: Vec<_> = state
+        .take_events()
+        .into_iter()
+        .filter_map(|event| match event.kind {
+            EventKind::GlobalRemove { name } => Some(name),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        withdrawn.len(),
+        1,
+        "a display that is gone stops being offered, the way any global does"
+    );
+
+    // And plugging it back in offers it again, under the identity it always had.
+    let delta = state.apply_topology(&[(identity(1), IdentitySource::Panel, info(1920, 1080))], 1);
+    assert_eq!(
+        delta.returned,
+        vec![identity(1)],
+        "the same display returning is the same display"
+    );
+    let offered = state
+        .take_events()
+        .into_iter()
+        .any(|event| matches!(event.kind, EventKind::Global { interface, .. } if interface == Interface::Output));
+    assert!(offered, "and it is offered again without the client asking");
 }
