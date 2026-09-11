@@ -155,6 +155,9 @@ pub enum Operation {
     ShellControlFocusChanged,
     ShellControlSnapshotDone,
     ShellControlInteraction,
+    ShellControlGrab,
+    ShellControlGrabMotion,
+    ShellControlGrabEnd,
     SeatGetPointer,
     PointerDestroy,
     PointerEnter,
@@ -292,8 +295,16 @@ impl Operation {
                 Event,
                 4,
                 "interaction",
-                &[U64, U64, U32, U32],
+                &[U64, U64, U32, U32, I32, I32],
             ),
+            // Where the pointer went while the shell held it. Sent only to a shell that asked,
+            // and only until the button comes up: a shell that could watch the pointer whenever
+            // it liked would be global input observation under another name.
+            Self::ShellControlGrabMotion => {
+                spec(I::ShellControl, Event, 5, "grab_motion", &[U64, I32, I32])
+            }
+            Self::ShellControlGrabEnd => spec(I::ShellControl, Event, 6, "grab_end", &[U64]),
+            Self::ShellControlGrab => spec(I::ShellControl, Method, 5, "grab", &[U64, U64]),
             Self::SeatGetPointer => spec(I::Seat, Method, 0, "get_pointer", &[Object]),
             Self::PointerDestroy => spec(I::Pointer, Method, 0, "destroy", &[]),
             // Every pointer event carries the epoch its routing belonged to. When continuity
@@ -381,6 +392,7 @@ impl Interface {
                 O::ShellControlRaise,
                 O::ShellControlFocus,
                 O::ShellControlClose,
+                O::ShellControlGrab,
             ],
         }
     }
@@ -410,6 +422,9 @@ impl Interface {
                 O::ShellControlToplevelGone,
                 O::ShellControlFocusChanged,
                 O::ShellControlSnapshotDone,
+                O::ShellControlInteraction,
+                O::ShellControlGrabMotion,
+                O::ShellControlGrabEnd,
             ],
             Self::Output => &[
                 O::OutputIdentity,

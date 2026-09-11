@@ -1219,6 +1219,12 @@ pub struct ShellInteraction {
     pub handle: u64,
     pub serial: u32,
     pub kind: u32,
+    /// Where in the window it happened, in the window's own coordinates.
+    ///
+    /// A shell needs this to tell a press on a window's chrome from a press on its content, which
+    /// is the difference between dragging the window and using the application.
+    pub x: i32,
+    pub y: i32,
 }
 
 impl ShellInteraction {
@@ -1234,6 +1240,8 @@ impl ShellInteraction {
             handle,
             serial: decoder.read_u32()?,
             kind: decoder.read_u32()?,
+            x: decoder.read_i32()?,
+            y: decoder.read_i32()?,
         };
         decoder.finish()?;
         Ok(value)
@@ -1242,14 +1250,16 @@ impl ShellInteraction {
 
 impl EncodePayload for ShellInteraction {
     fn encoded_len(&self) -> Result<usize, EncodeError> {
-        Ok(24)
+        Ok(32)
     }
 
     fn encode(&self, encoder: &mut Encoder<'_>) -> Result<(), EncodeError> {
         write_u64(encoder, self.seat)?;
         write_u64(encoder, self.handle)?;
         encoder.write_u32(self.serial)?;
-        encoder.write_u32(self.kind)
+        encoder.write_u32(self.kind)?;
+        encoder.write_i32(self.x)?;
+        encoder.write_i32(self.y)
     }
 }
 
@@ -1281,5 +1291,70 @@ impl EncodePayload for SeatHandle {
     fn encode(&self, encoder: &mut Encoder<'_>) -> Result<(), EncodeError> {
         write_u64(encoder, self.seat)?;
         write_u64(encoder, self.handle)
+    }
+}
+
+/// Where the pointer is, while a shell holds it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SeatPoint {
+    pub seat: u64,
+    pub x: i32,
+    pub y: i32,
+}
+
+impl SeatPoint {
+    /// # Errors
+    ///
+    /// Returns [`DecodeError`] when the payload is not a seat and a point.
+    pub fn decode(input: &[u8]) -> Result<Self, DecodeError> {
+        let mut decoder = Decoder::new(input);
+        let seat = read_u64(&mut decoder)?;
+        let value = Self {
+            seat,
+            x: decoder.read_i32()?,
+            y: decoder.read_i32()?,
+        };
+        decoder.finish()?;
+        Ok(value)
+    }
+}
+
+impl EncodePayload for SeatPoint {
+    fn encoded_len(&self) -> Result<usize, EncodeError> {
+        Ok(16)
+    }
+
+    fn encode(&self, encoder: &mut Encoder<'_>) -> Result<(), EncodeError> {
+        write_u64(encoder, self.seat)?;
+        encoder.write_i32(self.x)?;
+        encoder.write_i32(self.y)
+    }
+}
+
+/// A seat on its own, for a message that names nothing else.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SeatName {
+    pub seat: u64,
+}
+
+impl SeatName {
+    /// # Errors
+    ///
+    /// Returns [`DecodeError`] when the payload is not one seat.
+    pub fn decode(input: &[u8]) -> Result<Self, DecodeError> {
+        let mut decoder = Decoder::new(input);
+        let seat = read_u64(&mut decoder)?;
+        decoder.finish()?;
+        Ok(Self { seat })
+    }
+}
+
+impl EncodePayload for SeatName {
+    fn encoded_len(&self) -> Result<usize, EncodeError> {
+        Ok(8)
+    }
+
+    fn encode(&self, encoder: &mut Encoder<'_>) -> Result<(), EncodeError> {
+        write_u64(encoder, self.seat)
     }
 }
