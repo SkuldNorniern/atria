@@ -15,8 +15,8 @@ use std::process::exit;
 
 use atria_protocol::interface::{Interface, Operation};
 use atria_protocol::message::{
-    Bind, EncodePayload, NewId, RegistryGlobal, ShellHandle, ShellPlace, ShellToplevel,
-    encode_message,
+    Bind, EncodePayload, NewId, RegistryGlobal, SeatHandle, ShellHandle, ShellInteraction,
+    ShellPlace, ShellToplevel, encode_message,
 };
 use atria_protocol::wire::{Frame, MAX_MESSAGE_SIZE};
 use atria_protocol::{ObjectId, Opcode};
@@ -28,6 +28,9 @@ use libc::{
 
 const REGISTRY: u32 = 2;
 const CONTROL: u32 = 3;
+
+/// The one seat this server has. Named rather than assumed, because focus belongs to a seat.
+const SEAT: u64 = 1;
 
 /// Each window is offset from the last by this much, so none hides another completely.
 ///
@@ -96,6 +99,22 @@ fn main() {
                 known.retain(|known| *known != handle);
                 println!("elysium0: window {handle} is gone");
             }
+            Some(Told::Pressed(handle)) => {
+                // Click to focus and raise. This is the whole of it: Atria routes the press to
+                // the application as well, so the client gets its click and the shell gets to
+                // decide what the press means for arrangement.
+                shell.request(
+                    id(CONTROL),
+                    Operation::ShellControlRaise,
+                    &ShellHandle { handle },
+                );
+                shell.request(
+                    id(CONTROL),
+                    Operation::ShellControlFocus,
+                    &SeatHandle { seat: SEAT, handle },
+                );
+                println!("elysium0: raised and focused {handle}");
+            }
             Some(Told::FocusChanged(handle)) => {
                 println!("elysium0: focus is now {handle}");
             }
@@ -110,6 +129,8 @@ enum Told {
     Toplevel(u64),
     ToplevelGone(u64),
     FocusChanged(u64),
+    /// Somebody pressed a window. Which window, and nothing about the press itself.
+    Pressed(u64),
     Other,
 }
 
@@ -190,9 +211,14 @@ impl Shell {
                 .map(|payload| Told::ToplevelGone(payload.handle));
         }
         if opcode == Operation::ShellControlFocusChanged.opcode() {
-            return ShellHandle::decode(frame.payload)
+            return SeatHandle::decode(frame.payload)
                 .ok()
                 .map(|payload| Told::FocusChanged(payload.handle));
+        }
+        if opcode == Operation::ShellControlInteraction.opcode() {
+            return ShellInteraction::decode(frame.payload)
+                .ok()
+                .map(|payload| Told::Pressed(payload.handle));
         }
         Some(Told::Other)
     }
