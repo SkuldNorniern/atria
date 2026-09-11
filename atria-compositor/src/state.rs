@@ -8,7 +8,7 @@ use atria_protocol::ObjectId;
 use atria_protocol::capability::{Capability, CapabilitySet};
 use atria_protocol::error::ErrorCategory;
 
-use crate::error::StateError;
+use crate::error::{SceneFault, StateError};
 use atria_protocol::interface::toplevel_state;
 
 use crate::model::{
@@ -1720,6 +1720,43 @@ impl CompositorState {
             client.pending_events = 0;
         }
         take(&mut self.events)
+    }
+
+    /// Every way the scene can disagree with the objects behind it.
+    ///
+    /// The scene names surfaces by connection and object. Both can go away, and every path that
+    /// removes one is supposed to remove the scene entry with it. This is the check that says so,
+    /// rather than the next composition discovering it as a frame that would not build.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first disagreement found, naming the surface it is about.
+    pub fn scene_faults(&self) -> Result<(), SceneFault> {
+        for key in &self.scene.stack {
+            let Some(client) = self.connections.get(&key.connection) else {
+                return Err(SceneFault::ConnectionGone(*key));
+            };
+            match client.registry.kind_of(key.object_id) {
+                Some(ObjectKind::Surface) => {}
+                Some(_) => return Err(SceneFault::NotASurface(*key)),
+                None => return Err(SceneFault::ObjectGone(*key)),
+            }
+            if self
+                .surface_snapshot(key.connection, key.object_id)
+                .is_none()
+            {
+                return Err(SceneFault::NoContent(*key));
+            }
+            if !self.scene.positions.contains_key(key) {
+                return Err(SceneFault::NoPosition(*key));
+            }
+        }
+        for key in self.scene.positions.keys() {
+            if !self.connections.contains_key(&key.connection) {
+                return Err(SceneFault::ConnectionGone(*key));
+            }
+        }
+        Ok(())
     }
 
     /// Take the events queued for one connection, leaving everyone else's where they are.

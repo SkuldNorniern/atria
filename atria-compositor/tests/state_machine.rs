@@ -961,3 +961,36 @@ fn a_detached_surface_returns_to_the_place_it_was_given() {
         "a window that stopped drawing and started again is the same window"
     );
 }
+
+#[test]
+fn the_scene_never_names_anything_the_compositor_has_let_go() {
+    let mut state = state_with_limits(ConnectionLimits::default());
+    let client = connect(&mut state);
+    create_session(&mut state, client, 9);
+    create_surface(&mut state, client, 257);
+    import_buffer(&mut state, client, 300);
+    attach_and_commit(&mut state, client, 257, 300);
+    assert_eq!(state.scene_faults(), Ok(()));
+
+    // Every way a surface can leave, and after each the scene must agree with what is left.
+    state
+        .dispatch(client, ClientRequest::Destroy { object: id(257) })
+        .unwrap_or_else(|error| panic!("a surface is destroyed: {error:?}"));
+    assert_eq!(
+        state.scene_faults(),
+        Ok(()),
+        "destroying a surface takes it out of the scene"
+    );
+
+    create_surface(&mut state, client, 258);
+    attach_and_commit(&mut state, client, 258, 300);
+    assert_eq!(state.scene_faults(), Ok(()));
+
+    state.close_connection(client);
+    assert_eq!(
+        state.scene_faults(),
+        Ok(()),
+        "a connection going takes its surfaces out of the scene"
+    );
+    assert!(state.stacking_order().is_empty());
+}

@@ -6,7 +6,7 @@ use atria_protocol::capability::Capability;
 use atria_protocol::error::ErrorCategory;
 use atria_protocol::opcode::Opcode;
 
-use crate::model::ObjectKind;
+use crate::model::{ObjectKind, SurfaceKey};
 
 /// Codes chosen within the category ranges reserved by draft §10.
 ///
@@ -181,3 +181,42 @@ impl fmt::Display for StateError {
 }
 
 impl Error for StateError {}
+
+/// A disagreement between the scene and the objects it names.
+///
+/// None of these can happen through the protocol: every path that removes a connection, an object
+/// or a surface's content is supposed to take the scene entry with it. They exist so that a
+/// compositor which has got into one of these states says which one, instead of failing later as
+/// a frame that cannot be built.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SceneFault {
+    /// The scene names a surface on a connection that has gone.
+    ConnectionGone(SurfaceKey),
+    /// The scene names an object the connection no longer holds.
+    ObjectGone(SurfaceKey),
+    /// The scene names an object that is not a surface.
+    NotASurface(SurfaceKey),
+    /// The scene holds a surface that has nothing to show.
+    NoContent(SurfaceKey),
+    /// The scene stacks a surface it has nowhere to put.
+    NoPosition(SurfaceKey),
+}
+
+impl fmt::Display for SceneFault {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ConnectionGone(key) => {
+                write!(
+                    formatter,
+                    "{key:?} is in the scene and its connection is gone"
+                )
+            }
+            Self::ObjectGone(key) => write!(formatter, "{key:?} is in the scene and destroyed"),
+            Self::NotASurface(key) => {
+                write!(formatter, "{key:?} is in the scene and not a surface")
+            }
+            Self::NoContent(key) => write!(formatter, "{key:?} is in the scene with no content"),
+            Self::NoPosition(key) => write!(formatter, "{key:?} is stacked with no position"),
+        }
+    }
+}

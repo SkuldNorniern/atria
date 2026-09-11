@@ -21,7 +21,7 @@ mod state;
 
 pub use binding::{BindError, DecodedRequest, decode, interface_of, resolve};
 pub use emit::{EmitError, encode_event};
-pub use error::{ErrorCode, StateError};
+pub use error::{ErrorCode, SceneFault, StateError};
 pub use model::{
     BufferDescriptor, BufferState, BufferTransport, ClientRequest, CommitId, ConnectionId, Damage,
     Event, EventKind, FORMAT_ARGB8888, FORMAT_RGB565, FORMAT_XRGB8888, FocusEvent, ObjectKind,

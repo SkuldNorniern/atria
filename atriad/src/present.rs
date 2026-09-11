@@ -5,7 +5,7 @@
 //! the release reaches the client it cannot draw the next frame into that memory, so this is what
 //! makes a second frame possible rather than a nicety.
 
-use atria_compositor::{CompositorState, ConnectionId, Size};
+use atria_compositor::{CompositorState, ConnectionId, SceneFault, Size};
 use atria_protocol::ObjectId;
 use atria_software_output::{
     BufferKey, BufferStore, Frame, FrameReport, FrameSink, PixelLayout, PresentError,
@@ -28,6 +28,8 @@ pub enum PresentFailure {
     Invalid(ValidationError),
     /// Composition or the sink refused.
     Present(PresentError),
+    /// The scene disagrees with the objects it names, which no client request can cause.
+    Scene(SceneFault),
 }
 
 /// One output, and the pixels staged for it.
@@ -165,6 +167,12 @@ pub fn present_all<T: Transport>(
     timestamp_ns: u64,
     sink: &mut impl FrameSink,
 ) -> Result<FrameReport, PresentFailure> {
+    // Checked before composing, because a frame that cannot be built says only that it cannot be
+    // built. This says which surface disagrees with the objects behind it, and how.
+    if let Err(fault) = state.scene_faults() {
+        return Err(PresentFailure::Scene(fault));
+    }
+
     let order: Vec<_> = state.stacking_order().to_vec();
     for surface in order {
         let Some(buffer) = state
@@ -177,7 +185,9 @@ pub fn present_all<T: Transport>(
             .iter()
             .find(|session| session.connection() == surface.connection)
         else {
-            continue;
+            // The scene check above already proved the connection exists, so reaching here means
+            // the server holds a connection it has no session for.
+            return Err(PresentFailure::Scene(SceneFault::ConnectionGone(surface)));
         };
         presenter.stage(state, surface.connection, session.memory(), buffer)?;
     }
