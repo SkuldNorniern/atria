@@ -347,6 +347,66 @@ impl EncodePayload for Commit {
     }
 }
 
+/// `atria_registry.global_remove` payload, and any other message carrying one global name.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GlobalName {
+    pub name: u32,
+}
+
+impl GlobalName {
+    pub fn decode(input: &[u8]) -> Result<Self, DecodeError> {
+        let mut decoder = Decoder::new(input);
+        let value = Self {
+            name: decoder.read_u32()?,
+        };
+        decoder.finish()?;
+        Ok(value)
+    }
+}
+
+impl EncodePayload for GlobalName {
+    fn encoded_len(&self) -> Result<usize, EncodeError> {
+        Ok(4)
+    }
+
+    fn encode(&self, encoder: &mut Encoder<'_>) -> Result<(), EncodeError> {
+        encoder.write_u32(self.name)
+    }
+}
+
+/// `atria_registry.bind` payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Bind {
+    pub name: u32,
+    pub version: u32,
+    pub new_id: ObjectId,
+}
+
+impl Bind {
+    pub fn decode(input: &[u8]) -> Result<Self, DecodeError> {
+        let mut decoder = Decoder::new(input);
+        let value = Self {
+            name: decoder.read_u32()?,
+            version: decoder.read_u32()?,
+            new_id: ObjectId::from_raw(decoder.read_u32()?),
+        };
+        decoder.finish()?;
+        Ok(value)
+    }
+}
+
+impl EncodePayload for Bind {
+    fn encoded_len(&self) -> Result<usize, EncodeError> {
+        Ok(12)
+    }
+
+    fn encode(&self, encoder: &mut Encoder<'_>) -> Result<(), EncodeError> {
+        encoder.write_u32(self.name)?;
+        encoder.write_u32(self.version)?;
+        encoder.write_u32(self.new_id.into_raw())
+    }
+}
+
 /// `atria_surface.frame_done` payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FrameDone {
