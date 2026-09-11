@@ -52,7 +52,7 @@ impl DrmSink {
 
 impl FrameSink for DrmSink {
     fn present(&mut self, presented: Presented<'_>) -> Result<(), SinkError> {
-        DrmSink::present(self, presented.frame, presented.report).map_err(drm_sink_error)
+        DrmSink::present(self, &presented.frame, presented.report).map_err(drm_sink_error)
     }
 }
 

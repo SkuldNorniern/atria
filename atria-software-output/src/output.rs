@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
-use std::mem::swap;
+use std::mem::replace;
+use std::sync::Arc;
 
 use atria_compositor::{
     BufferDescriptor, BufferState, BufferTransport, CommitId, CompositorState, Damage, Point, Rect,
@@ -32,6 +33,10 @@ struct SurfaceImage {
     bytes: Vec<u8>,
 }
 
+/// Frames kept back for reuse. A sink holds at most the frame it was last given and the one
+/// before it, so two is enough for the pool to keep up without growing.
+const SPARE_FRAMES: usize = 2;
+
 /// Where a surface was drawn, and how far up the stack. A change to either moves pixels without
 /// the surface's content changing at all.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -42,10 +47,17 @@ struct Placement {
 
 #[derive(Clone, Debug)]
 pub struct SoftwareOutput {
-    frame: Frame,
-    /// Composed into, then swapped with `frame`. Two lasting allocations rather than one per
-    /// frame, which at 1280x720 is 3.5 MB of churn per pointer movement.
-    spare: Frame,
+    size: Size,
+    layout: PixelLayout,
+    /// The frame last composed, shared with whoever was handed it rather than copied to them.
+    current: Arc<Frame>,
+    /// Frames nobody holds any more, composed into rather than allocated again. At 1280x720 a
+    /// frame is 3.5 MB, which above the allocator's threshold means a fresh mapping the kernel
+    /// has to zero and fault in, once per pointer movement.
+    spare: Vec<Frame>,
+    /// Frames handed out and not yet let go of. A sink keeps what it was last given, so the one
+    /// just replaced usually becomes reusable a frame later.
+    retiring: Vec<Arc<Frame>>,
     surfaces: BTreeMap<SurfaceKey, SurfaceImage>,
     /// Where each surface was drawn in the frame before this one.
     placed: BTreeMap<SurfaceKey, Placement>,
@@ -63,8 +75,11 @@ pub struct SoftwareOutput {
 impl SoftwareOutput {
     pub fn new(size: Size, layout: PixelLayout) -> Result<Self, ValidationError> {
         Ok(Self {
-            frame: Frame::new(size, layout)?,
-            spare: Frame::new(size, layout)?,
+            size,
+            layout,
+            current: Arc::new(Frame::new(size, layout)?),
+            spare: vec![Frame::new(size, layout)?],
+            retiring: Vec::new(),
             surfaces: BTreeMap::new(),
             placed: BTreeMap::new(),
             damage: Vec::new(),
@@ -73,8 +88,45 @@ impl SoftwareOutput {
     }
 
     #[must_use]
-    pub const fn frame(&self) -> &Frame {
-        &self.frame
+    pub fn frame(&self) -> &Frame {
+        &self.current
+    }
+
+    /// The frame last composed, to hold rather than copy.
+    #[must_use]
+    pub fn shared_frame(&self) -> Arc<Frame> {
+        Arc::clone(&self.current)
+    }
+
+    /// A frame to compose into: one nobody holds, or a new one.
+    fn take_frame(&mut self) -> Result<Frame, ComposeError> {
+        match self.spare.pop() {
+            Some(frame) => Ok(frame),
+            None => Frame::new(self.size, self.layout).map_err(ComposeError::InvalidOutput),
+        }
+    }
+
+    /// Publish `composed`, and take back whatever nobody is holding any more.
+    fn publish(&mut self, composed: Frame) {
+        self.retiring
+            .push(replace(&mut self.current, Arc::new(composed)));
+        let mut index = self.retiring.len();
+        while index > 0 {
+            index -= 1;
+            if Arc::strong_count(&self.retiring[index]) != 1 {
+                continue;
+            }
+            let frame = self.retiring.swap_remove(index);
+            if let Ok(frame) = Arc::try_unwrap(frame)
+                && self.spare.len() < SPARE_FRAMES
+            {
+                self.spare.push(frame);
+            }
+        }
+        // A sink that keeps everything it is given cannot make this grow without bound.
+        while self.retiring.len() > SPARE_FRAMES {
+            self.retiring.remove(0);
+        }
     }
 
     /// What the last composed frame changed, relative to the one before it.
@@ -89,10 +141,10 @@ impl SoftwareOutput {
         let top = origin_y.max(0);
         let right = origin_x
             .saturating_add(i64::from(size.width))
-            .min(i64::from(self.frame.size().width));
+            .min(i64::from(self.size.width));
         let bottom = origin_y
             .saturating_add(i64::from(size.height))
-            .min(i64::from(self.frame.size().height));
+            .min(i64::from(self.size.height));
         if left >= right || top >= bottom {
             return None;
         }
@@ -144,8 +196,8 @@ impl SoftwareOutput {
             self.damage.push(Rect {
                 x: 0,
                 y: 0,
-                width: self.frame.size().width,
-                height: self.frame.size().height,
+                width: self.size.width,
+                height: self.size.height,
             });
         }
         self.placed = now;
@@ -162,7 +214,7 @@ impl SoftwareOutput {
         buffers: &BufferStore,
         timestamp_ns: u64,
     ) -> Result<FrameReport, ComposeError> {
-        let layout = self.frame.layout();
+        let layout = self.layout;
         let mut active = BTreeSet::new();
         let mut consumed = Vec::new();
         let mut damage_count = 0_usize;
@@ -299,7 +351,8 @@ impl SoftwareOutput {
 
         self.surfaces.retain(|surface, _| active.contains(surface));
         // Into the kept frame, then swapped in.
-        self.spare.clear();
+        let mut target = self.take_frame()?;
+        target.clear();
         for &surface in state.stacking_order() {
             let snapshot = state
                 .surface_snapshot(surface.connection, surface.object_id)
@@ -311,7 +364,7 @@ impl SoftwareOutput {
                 .surfaces
                 .get(&surface)
                 .ok_or(ComposeError::MissingSurfaceState(surface))?;
-            blit_surface(surface, image, position, snapshot.offset, &mut self.spare)?;
+            blit_surface(surface, image, position, snapshot.offset, &mut target)?;
         }
 
         for (surface, buffer, _) in &consumed {
@@ -338,9 +391,9 @@ impl SoftwareOutput {
             surfaces_composited: self.surfaces.len(),
             commits_consumed: consumed.len(),
             damage_rectangles_consumed: damage_count,
-            bytes_written: self.spare.bytes().len(),
+            bytes_written: target.bytes().len(),
         };
-        swap(&mut self.frame, &mut self.spare);
+        self.publish(target);
         Ok(report)
     }
 
@@ -355,7 +408,7 @@ impl SoftwareOutput {
             .compose(state, buffers, timestamp_ns)
             .map_err(PresentError::Compose)?;
         sink.present(Presented {
-            frame: &self.frame,
+            frame: Arc::clone(&self.current),
             damage: &self.damage,
             report,
         })

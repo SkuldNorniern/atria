@@ -13,7 +13,7 @@ use std::thread;
 use std::time::Duration;
 
 use atria_software_output::Rect;
-use atria_software_output::{FrameSink, Presented, SinkError};
+use atria_software_output::{Frame, FrameSink, Presented, SinkError};
 
 use crate::input::{Input, InputQueue};
 use crate::protocol::{
@@ -91,7 +91,7 @@ enum Pending {
 #[derive(Default)]
 struct Held {
     id: u64,
-    bytes: Arc<Vec<u8>>,
+    frame: Option<Arc<Frame>>,
     pending: Pending,
 }
 
@@ -112,11 +112,6 @@ struct Latest {
 pub struct VncSink {
     latest: Arc<Latest>,
     frames_composed: u64,
-    /// Frame allocations no viewer holds, reused rather than faulted in again.
-    spare: Vec<Vec<u8>>,
-    /// Frames handed out and not yet let go of. A viewer holds the last frame it drew, so the
-    /// one just replaced becomes reusable a frame later.
-    retiring: Vec<Arc<Vec<u8>>>,
     /// Readable when the viewer has done something, so a server waiting on descriptors wakes.
     waker: UnixStream,
 }
@@ -157,8 +152,6 @@ impl VncSink {
         Ok(Self {
             latest,
             frames_composed: 0,
-            spare: Vec::new(),
-            retiring: Vec::new(),
             waker,
         })
     }
@@ -236,7 +229,7 @@ impl Viewer {
             let mut hextile = false;
             // What this viewer was last sent, to compare the damaged part of the next frame
             // against. A rectangle list is only correct against the frame it came from.
-            let mut sent: Option<Arc<Vec<u8>>> = None;
+            let mut sent: Option<Arc<Frame>> = None;
             loop {
                 // A newer viewer replaces this one. Nothing is shared between them, so the new
                 // one starts from a whole frame.
@@ -262,19 +255,19 @@ impl Viewer {
                     break;
                 }
                 // Only when asked: pushing at a client that is not reading blocks this thread.
-                if asked && let Some((id, bytes, pending)) = self.frame_after(shown) {
+                if asked && let Some((id, frame, pending)) = self.frame_after(shown) {
                     shown = id;
                     let previous = if asked_whole {
                         None
                     } else {
-                        sent.as_deref().map(Vec::as_slice)
+                        sent.as_deref().map(Frame::bytes)
                     };
                     let bounds = match pending {
                         Pending::Whole => vec![self.whole()],
                         Pending::Regions(regions) => regions,
                     };
                     let regions =
-                        changed_regions(previous, &bytes, self.size.0, self.size.1, &bounds);
+                        changed_regions(previous, frame.bytes(), self.size.0, self.size.1, &bounds);
                     // Nothing changed. The request stays outstanding rather than being answered
                     // empty, so the next frame that does change something reaches it unasked.
                     if !regions.is_empty() {
@@ -283,7 +276,7 @@ impl Viewer {
                         if let Err(error) = write_update(
                             &mut stream,
                             &regions,
-                            &bytes,
+                            frame.bytes(),
                             self.size.0,
                             format,
                             hextile,
@@ -292,7 +285,7 @@ impl Viewer {
                             break;
                         }
                     }
-                    sent = Some(bytes);
+                    sent = Some(frame);
                 }
                 // Waits unless there is something to send, or a quiet viewer burns a core.
                 self.wait_briefly(if asked { shown } else { u64::MAX });
@@ -313,9 +306,6 @@ const VIEWER_TICK: Duration = Duration::from_millis(2);
 
 /// How many rectangles are worth naming before redrawing everything is cheaper.
 const MAX_PENDING_REGIONS: usize = 64;
-
-/// A viewer holds at most the frame it last drew, so two is enough and the pool cannot grow.
-const SPARE_FRAMES: usize = 2;
 
 impl Viewer {
     /// Take a waiting viewer, if one is there. Never waits.
@@ -338,17 +328,18 @@ impl Viewer {
 
     /// The composed frame, if one newer than `shown` exists. Never waits.
     /// Take the newest frame and everything that has changed since this was last called.
-    fn frame_after(&self, shown: u64) -> Option<(u64, Arc<Vec<u8>>, Pending)> {
+    fn frame_after(&self, shown: u64) -> Option<(u64, Arc<Frame>, Pending)> {
         let mut held = self
             .latest
             .frame
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if held.id == shown || held.bytes.is_empty() {
+        if held.id == shown {
             return None;
         }
+        let frame = held.frame.clone()?;
         let pending = replace(&mut held.pending, Pending::Regions(Vec::new()));
-        Some((held.id, Arc::clone(&held.bytes), pending))
+        Some((held.id, frame, pending))
     }
 
     /// Say that this viewer knows nothing, so the next frame it asks for arrives whole.
@@ -652,11 +643,8 @@ fn alloc_message(number: u8) -> String {
 impl FrameSink for VncSink {
     fn present(&mut self, presented: Presented<'_>) -> Result<(), SinkError> {
         self.frames_composed += 1;
-        // Copied: the frame belongs to the next composition once this returns.
-        let mut bytes = self.spare.pop().unwrap_or_default();
-        bytes.clear();
-        bytes.extend_from_slice(presented.frame.bytes());
-
+        // Held, not copied. The output keeps its own pool, so a frame a viewer is still writing
+        // out is one the next composition will not be given.
         let mut held = self
             .latest
             .frame
@@ -664,24 +652,9 @@ impl FrameSink for VncSink {
             .unwrap_or_else(PoisonError::into_inner);
         held.id = self.frames_composed;
         held.pending = accumulate(replace(&mut held.pending, Pending::Whole), presented.damage);
-        let replaced = replace(&mut held.bytes, Arc::new(bytes));
+        held.frame = Some(presented.frame);
         drop(held);
         self.latest.composed.notify_all();
-
-        self.retiring.push(replaced);
-        let mut index = self.retiring.len();
-        while index > 0 {
-            index -= 1;
-            if Arc::strong_count(&self.retiring[index]) != 1 {
-                continue;
-            }
-            let frame = self.retiring.swap_remove(index);
-            if let Ok(bytes) = Arc::try_unwrap(frame)
-                && self.spare.len() < SPARE_FRAMES
-            {
-                self.spare.push(bytes);
-            }
-        }
         Ok(())
     }
 }

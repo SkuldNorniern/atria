@@ -4,14 +4,19 @@ use std::path::Path;
 
 use atria_compositor::Rect;
 
+use std::sync::Arc;
+
 use crate::{Frame, FrameReport, SinkError};
 
 /// A composed frame and what it changed.
 ///
 /// `damage` covers every pixel differing from the frame before it, and may cover more. A sink
 /// that redraws only those rectangles shows the same thing as one that redraws everything.
+///
+/// The frame is shared rather than lent, so a sink that has to hold it — one writing from
+/// another thread — keeps it without copying the pixels out.
 pub struct Presented<'a> {
-    pub frame: &'a Frame,
+    pub frame: Arc<Frame>,
     pub damage: &'a [Rect],
     pub report: FrameReport,
 }
