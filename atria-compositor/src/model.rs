@@ -13,11 +13,8 @@ use crate::output::IdentitySource;
 use crate::resolve::SharedMemory;
 use crate::shell::ToplevelHandle;
 
-/// An input and routing domain.
-///
-/// Not "the mouse and keyboard": one machine can have two people at it, and a television has a
-/// remote and a gamepad. Everything about focus and routing is a seat's, so a model with one
-/// global focus would have to be replaced rather than extended.
+/// An input and routing domain. Not "the mouse and keyboard": focus belongs to a seat, so one
+/// machine with two people at it has two.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SeatId(pub u64);
 
@@ -334,11 +331,8 @@ pub enum ClientRequest {
         control: ObjectId,
         handle: ToplevelHandle,
     },
-    /// A shell asking to hold the pointer until the button that started it comes up.
-    ///
-    /// Bounded by the button deliberately. A shell that could hold the pointer for as long as it
-    /// liked would be able to watch everything a person did, which is a different power from
-    /// being able to move a window.
+    /// A shell asking to hold the pointer until the button that started it comes up. Bounded by
+    /// the button: holding it indefinitely would be watching everything a person did.
     ShellGrab {
         control: ObjectId,
         seat: SeatId,
@@ -499,10 +493,8 @@ pub enum EventKind {
         pressed: bool,
         epoch: u32,
     },
-    /// A person did something to a window, as a shell is told about it.
-    ///
-    /// Deliberately not the input itself. A shell needs to know a window was pressed so it can
-    /// raise and focus it; it has no business seeing what is typed into it afterwards.
+    /// A person did something to a window. Not the input itself: a shell needs to know a window
+    /// was pressed, not what is typed into it.
     ShellInteraction {
         seat: SeatId,
         handle: ToplevelHandle,
@@ -540,11 +532,8 @@ pub enum EventKind {
         numerator: u32,
         denominator: u32,
     },
-    /// A window a shell is told about, by the handle it uses to name it.
-    ///
-    /// The same event whether the window existed before the shell attached or appeared after.
-    /// What separates those is the snapshot boundary, so a second event carrying the same fields
-    /// would say nothing the boundary does not.
+    /// A window a shell is told about. The same event before and after the snapshot boundary,
+    /// which is what separates "already there" from "just appeared".
     ShellToplevel {
         handle: ToplevelHandle,
         title: String,
@@ -558,15 +547,9 @@ pub enum EventKind {
         seat: SeatId,
         handle: ToplevelHandle,
     },
-    /// Everything the shell was told before this is the state as it stood when it attached.
-    ///
-    /// A shell that had to enumerate the world and receive changes at the same time would race
-    /// the compositor for its own starting picture. This is the line between the two.
+    /// Everything before this is the state as it stood when the shell attached.
     ShellSnapshotDone,
     /// Everything above describes one consistent state of the display.
-    ///
-    /// The properties arrive as separate events, so a client that acted on each as it came would
-    /// act on a display half-described. This is the boundary that says the description is whole.
     OutputDone,
 }
 

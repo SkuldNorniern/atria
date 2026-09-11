@@ -8,6 +8,7 @@ use atria_compositor::{
 use atria_protocol::ObjectId;
 use atria_protocol::capability::{Capability, CapabilitySet};
 use atria_protocol::interface::Interface;
+use atria_protocol::key::{Modifiers, PhysicalKey, usage};
 
 fn id(raw: u32) -> ObjectId {
     ObjectId::from_raw(raw)
@@ -439,5 +440,137 @@ fn a_shell_holds_the_pointer_only_while_the_button_that_started_it_is_down() {
             .iter()
             .any(|kind| matches!(kind, EventKind::ShellGrabMotion { .. })),
         "and the shell stops seeing the pointer the moment the grab is over"
+    );
+}
+
+/// Keys go to whatever holds the seat's focus, and to nothing else.
+#[test]
+fn keys_reach_the_window_that_holds_focus_and_no_other() {
+    let mut state = server();
+    let (focused, surface) = window(&mut state, 100, Point { x: 0, y: 0 });
+    let (other, _) = window(&mut state, 100, Point { x: 200, y: 200 });
+    state
+        .dispatch(
+            focused,
+            ClientRequest::GetKeyboard {
+                seat: id(3),
+                new_id: id(5),
+            },
+        )
+        .unwrap_or_else(|error| panic!("a keyboard: {error:?}"));
+    state
+        .dispatch(
+            other,
+            ClientRequest::GetKeyboard {
+                seat: id(3),
+                new_id: id(5),
+            },
+        )
+        .unwrap_or_else(|error| panic!("a keyboard: {error:?}"));
+    state
+        .set_keyboard_focus(Some(surface))
+        .unwrap_or_else(|error| panic!("focus: {error:?}"));
+    let _ = state.take_events();
+
+    state.key(PhysicalKey::from_usage(usage::A), true, 1_000);
+
+    let told = |state: &mut CompositorState, connection| -> Vec<EventKind> {
+        state
+            .take_events()
+            .into_iter()
+            .filter(|event| event.connection == connection && event.object_id == id(5))
+            .map(|event| event.kind)
+            .collect()
+    };
+    let mine = told(&mut state, focused);
+    assert!(
+        mine.iter().any(|kind| matches!(
+            kind,
+            EventKind::Key { key, pressed: true, .. } if key.usage() == usage::A
+        )),
+        "the window holding focus is given the key"
+    );
+    assert!(
+        told(&mut state, other).is_empty(),
+        "and no other window hears it"
+    );
+}
+
+/// Holding a key does not press it again, and releasing one that is up is not a release.
+#[test]
+fn a_key_already_down_is_not_pressed_twice() {
+    let mut state = server();
+    let (client, surface) = window(&mut state, 100, Point { x: 0, y: 0 });
+    state
+        .dispatch(
+            client,
+            ClientRequest::GetKeyboard {
+                seat: id(3),
+                new_id: id(5),
+            },
+        )
+        .unwrap_or_else(|error| panic!("a keyboard: {error:?}"));
+    state
+        .set_keyboard_focus(Some(surface))
+        .unwrap_or_else(|error| panic!("focus: {error:?}"));
+    let _ = state.take_events();
+
+    let key = PhysicalKey::from_usage(usage::Q);
+    state.key(key, true, 1_000);
+    state.key(key, true, 2_000);
+    state.key(key, false, 3_000);
+    state.key(key, false, 4_000);
+
+    let keys: Vec<_> = state
+        .take_events()
+        .into_iter()
+        .filter_map(|event| match event.kind {
+            EventKind::Key { pressed, .. } => Some(pressed),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        keys,
+        vec![true, false],
+        "a repeat is not a state change, and neither is releasing what is up"
+    );
+}
+
+/// Modifiers are tracked as a set, and a break in routing empties it.
+#[test]
+fn a_break_in_routing_lets_go_of_every_key_that_was_held() {
+    let mut state = server();
+    let (client, surface) = window(&mut state, 100, Point { x: 0, y: 0 });
+    state
+        .dispatch(
+            client,
+            ClientRequest::GetKeyboard {
+                seat: id(3),
+                new_id: id(5),
+            },
+        )
+        .unwrap_or_else(|error| panic!("a keyboard: {error:?}"));
+    state
+        .set_keyboard_focus(Some(surface))
+        .unwrap_or_else(|error| panic!("focus: {error:?}"));
+
+    state.key(PhysicalKey::from_usage(usage::LEFT_SHIFT), true, 1_000);
+    assert!(
+        state.modifiers().contains(Modifiers::SHIFT),
+        "a modifier held is a modifier reported"
+    );
+
+    state.reset_pointer();
+    assert!(
+        state.modifiers().is_empty(),
+        "keys held in the old routing world are not held in the new one"
+    );
+
+    // And the key may be pressed again, because it is no longer believed to be down.
+    let _ = state.take_events();
+    state.key(PhysicalKey::from_usage(usage::LEFT_SHIFT), true, 2_000);
+    assert!(
+        state.modifiers().contains(Modifiers::SHIFT),
+        "pressing it again takes effect rather than being read as a repeat"
     );
 }

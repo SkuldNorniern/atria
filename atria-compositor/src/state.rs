@@ -251,31 +251,19 @@ const MAX_HELD_KEYS: usize = 32;
 
 #[derive(Clone, Debug, Default)]
 struct PointerRouting {
-    /// Where the pointer is, in the scene.
     position: Point,
-    /// The surface events are going to.
-    ///
-    /// While a button is held this is the surface the press landed on, wherever the pointer
-    /// afterwards goes. A client dragging a scrollbar out of its own window must keep receiving
-    /// the drag, or the release never arrives and it is left holding a button forever.
+    /// Where events go. While a button is held, the surface the press landed on, wherever the
+    /// pointer then goes — otherwise the release never reaches whoever took the press.
     target: Option<SurfaceKey>,
-    /// Which buttons are down. The grab lasts exactly as long as any of them.
+    /// The implicit grab lasts as long as any of these is down.
     buttons_held: u32,
-    /// Advances whenever routing continuity breaks.
-    ///
-    /// A press in one epoch and a release in the next are not a pair. Carrying the epoch on every
-    /// event lets a client reject the stale half instead of believing a button is still down.
+    /// Advances when routing continuity breaks, so a stale press and a live release are not a pair.
     epoch: u32,
-    /// Distinguishes one event from another for a client that must quote one back.
     serial: u32,
     modifiers: Modifiers,
     /// Keys held, so focus arriving mid-chord can say what is down. Bounded by `MAX_HELD_KEYS`.
     held: BTreeSet<PhysicalKey>,
-    /// The shell holding the pointer, if one asked for it.
-    ///
-    /// Set by a shell during a press it was told about, and cleared when the button comes up.
-    /// While it is set the client sees nothing: a window being dragged is not a window being
-    /// used, and sending it motion it cannot act on would be sending it a lie.
+    /// A shell holding the pointer for a drag. Set during a press, cleared when it comes up.
     shell_grab: Option<(ConnectionId, ObjectId)>,
 }
 
@@ -1404,13 +1392,8 @@ impl CompositorState {
         &self.outputs
     }
 
-    /// Apply one whole topology change, and make the globals match it.
-    ///
-    /// A display that arrived or returned gains a global; one that departed loses its own. Every
-    /// connected client is told, because a client that bound a display which has gone is holding
-    /// an object describing something that is no longer there.
-    ///
-    /// Returns what the change did, for a shell that has to rearrange around it.
+    /// Apply one whole topology change and make the globals match it. A display that arrived or
+    /// returned gains a global; one that departed loses its own.
     pub fn apply_topology(
         &mut self,
         present: &[(OutputIdentity, IdentitySource, OutputInfo)],
@@ -1479,11 +1462,8 @@ impl CompositorState {
             .map(|(name, _)| *name)
     }
 
-    /// Tell a connection everything about the display an object it just bound names.
-    ///
-    /// Five events and then `done`. A display's properties are separate events because they
-    /// change independently, and `done` is what says the description is whole — a client that
-    /// acted on each as it arrived would act on a display half-described.
+    /// Describe a bound display: its properties, then `done`. Acting on each as it arrives would
+    /// be acting on a display half-described.
     fn describe_output(&mut self, connection: ConnectionId, object: ObjectId, name: u32) {
         let Some(identity) = self.globals.get(&name).and_then(|global| global.output) else {
             return;
@@ -1538,11 +1518,8 @@ impl CompositorState {
         self.push_event(connection, object, EventKind::OutputDone);
     }
 
-    /// Tell every attached shell something changed.
-    ///
-    /// A shell that bound its authority is told about windows it did not create, because
-    /// arranging them is its whole purpose. A connection with no shell-control object is told
-    /// nothing, which is the same boundary the grant draws everywhere else.
+    /// Tell every attached shell something changed. A connection with no shell-control object
+    /// is told nothing.
     fn tell_shells(&mut self, event: EventKind) {
         let bound: Vec<_> = self
             .connections
@@ -1561,16 +1538,8 @@ impl CompositorState {
         }
     }
 
-    /// Tell a shell the world as it stands, then say the telling is over.
-    ///
-    /// A shell attaching to a compositor that has been running finds windows already there. It is
-    /// told about each by handle, and then told the snapshot is complete — after which the same
-    /// events mean "this just happened". Without that boundary a shell would have to enumerate
-    /// the world and receive changes to it at the same time, and race the compositor for its own
-    /// starting picture.
-    ///
-    /// This is what makes a replacement shell possible at all: it is the difference between
-    /// restarting the shell and restarting the session.
+    /// Tell a shell the world as it stands, then say the telling is over. After the boundary the
+    /// same events mean "this just happened", so a shell never races for its own starting picture.
     fn snapshot_for_shell(&mut self, connection: ConnectionId, control: ObjectId) {
         for record in self.shell_toplevels() {
             self.push_event(
@@ -1844,11 +1813,8 @@ impl CompositorState {
         self.pointer.epoch
     }
 
-    /// Break pointer routing continuity and start a new epoch.
-    ///
-    /// Called when what the pointer was pointing at stops being meaningful — a device leaving, a
-    /// grab cancelled, routing rebuilt. Anything still in flight from the old world carries the
-    /// old epoch and can be recognised as stale rather than acted on.
+    /// Break routing continuity and start a new epoch. Anything in flight from the old one
+    /// carries the old epoch and is recognisable as stale.
     pub fn reset_pointer(&mut self) {
         if let Some(target) = self.pointer.target.take() {
             self.send_pointer_leave(target);
@@ -1867,10 +1833,8 @@ impl CompositorState {
         self.pointer.epoch = self.pointer.epoch.wrapping_add(1);
     }
 
-    /// Move the pointer, routing enter, leave and motion to whatever it is over.
-    ///
-    /// While a button is held the target does not change: the surface the press landed on keeps
-    /// receiving motion even outside itself, and stops only when the last button comes up.
+    /// Move the pointer, routing enter, leave and motion to whatever it is over. While a button
+    /// is held the target does not change.
     pub fn move_pointer(&mut self, position: Point, time_ns: u64) {
         self.pointer.position = position;
         if let Some((connection, control)) = self.pointer.shell_grab {
@@ -1904,12 +1868,8 @@ impl CompositorState {
         }
     }
 
-    /// Press or release a pointer button.
-    ///
-    /// A press takes the implicit grab; the release of the last held button gives it back and
-    /// recomputes what the pointer is over. A press also tells any attached shell that a window
-    /// was interacted with — which is what click-to-focus is built from, without the shell ever
-    /// seeing what the client does with the click.
+    /// Press or release a pointer button. A press takes the implicit grab; the last release
+    /// gives it back. A press also tells any attached shell which window was pressed.
     pub fn pointer_button(&mut self, button: u32, pressed: bool, time_ns: u64) {
         if pressed && self.pointer.buttons_held == 0 {
             self.pointer.target = self.surface_under(self.pointer.position);
@@ -1918,9 +1878,8 @@ impl CompositorState {
             }
         }
 
-        // The shell holding the pointer is checked before anything is routed to a client: the
-        // grab took the target away, and a release that returned early here would leave the shell
-        // holding the pointer for ever.
+        // Checked before any client routing: the grab took the target away, so returning early
+        // below would leave the shell holding the pointer for ever.
         if let Some((connection, control)) = self.pointer.shell_grab {
             if !pressed {
                 self.pointer.buttons_held = self.pointer.buttons_held.saturating_sub(1);
@@ -1948,8 +1907,7 @@ impl CompositorState {
         self.pointer.serial = self.pointer.serial.wrapping_add(1);
         let serial = self.pointer.serial;
         let epoch = self.pointer.epoch;
-        // Addressed to the pointer object, like every other pointer event. The surface is what
-        // the pointer is over, not what the seat speaks through.
+        // On the pointer object, not the surface: the surface is what it is over.
         self.send_to_pointers(target.connection, |_| EventKind::PointerButton {
             serial,
             time_ns,
@@ -2086,9 +2044,7 @@ impl CompositorState {
         })
     }
 
-    /// Send to every pointer object the surface's connection holds.
-    ///
-    /// A connection may hold more than one; each is a view of the same seat, so each is told.
+    /// Send to every pointer object the connection holds; each is a view of the same seat.
     fn send_to_pointers(&mut self, connection: ConnectionId, make: impl Fn(ObjectId) -> EventKind) {
         let pointers: Vec<_> = self
             .connections
@@ -2140,11 +2096,8 @@ impl CompositorState {
             epoch,
         });
     }
-    /// Every way the scene can disagree with the objects behind it.
-    ///
-    /// The scene names surfaces by connection and object. Both can go away, and every path that
-    /// removes one is supposed to remove the scene entry with it. This is the check that says so,
-    /// rather than the next composition discovering it as a frame that would not build.
+    /// Every way the scene can disagree with the objects behind it. Every path that removes a
+    /// connection, an object or a surface's content must take the scene entry with it.
     ///
     /// # Errors
     ///
@@ -2177,11 +2130,8 @@ impl CompositorState {
         Ok(())
     }
 
-    /// Take the events queued for one connection, leaving everyone else's where they are.
-    ///
-    /// A server writing to several clients cannot drain the whole queue to serve one of them:
-    /// every other client's events would be taken and thrown away by a session they do not belong
-    /// to. Whichever client was written to first would silently eat the rest.
+    /// Take one connection's events, leaving everyone else's. Draining the whole queue to serve
+    /// one client would have it eat the rest.
     pub fn take_events_for(&mut self, connection: ConnectionId) -> Vec<Event> {
         let mut mine = Vec::new();
         let mut theirs = Vec::new();
@@ -2696,10 +2646,8 @@ impl CompositorState {
         .map_err(|_| ShellError::UnknownHandle { handle })
     }
 
-    /// Give a shell the pointer until the button that started it comes up.
-    ///
-    /// Refused when no button is down: a grab that did not begin in a press would have nothing to
-    /// end it, and a shell holding the pointer indefinitely is global input observation.
+    /// Give a shell the pointer until the button that started it comes up. Refused when nothing
+    /// is pressed: a grab with nothing to end it is global input observation.
     ///
     /// # Errors
     ///
@@ -2717,9 +2665,7 @@ impl CompositorState {
         if self.pointer.buttons_held == 0 {
             return Err(ShellError::UnknownHandle { handle });
         }
-        // The client stops seeing the pointer for the duration. It was told about the press; what
-        // follows belongs to the shell, and a client left mid-gesture would be waiting for a
-        // release that is not coming to it.
+        // The client stops seeing the pointer, rather than waiting for a release it will not get.
         if let Some(target) = self.pointer.target.take() {
             self.send_pointer_leave(target);
         }

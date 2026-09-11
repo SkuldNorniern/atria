@@ -61,6 +61,7 @@ dependencies = [
 name = "atria-vnc"
 version = "0.1.0"
 dependencies = [
+ "atria-protocol",
  "atria-software-output",
 ]
 
