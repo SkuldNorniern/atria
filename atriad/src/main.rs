@@ -46,8 +46,8 @@ const OUTPUT_WIDTH: u32 = 1280;
 const OUTPUT_HEIGHT: u32 = 720;
 const OUTPUT_REFRESH_MILLIHERTZ: u32 = 60_000;
 
-/// How long the server waits before checking a viewer for input.
-const INPUT_INTERVAL_MS: i32 = 16;
+/// Descriptors watched before the sessions: the two listeners and the viewer's wakeup.
+const WATCHED_LISTENERS: usize = 3;
 
 /// The button a viewer's primary click reports as.
 const PRIMARY_BUTTON: u32 = 1;
@@ -200,6 +200,11 @@ fn run() -> io::Result<()> {
             events: POLLIN,
             revents: 0,
         });
+        watched.push(pollfd {
+            fd: viewer.as_ref().map_or(-1, |sink| sink.wakeup().as_raw_fd()),
+            events: POLLIN,
+            revents: 0,
+        });
         for session in &sessions {
             watched.push(pollfd {
                 fd: session.transport().as_fd().as_raw_fd(),
@@ -208,17 +213,11 @@ fn run() -> io::Result<()> {
             });
         }
 
-        // A viewer's input arrives on a thread of its own, so the wait is bounded while anyone
-        // could be pointing at something. With no viewer there is nothing to check for and the
-        // wait is indefinite, because waking to find nothing is work done for no reason.
-        let timeout = if viewer.is_some() {
-            INPUT_INTERVAL_MS
-        } else {
-            -1
-        };
+        // Waits indefinitely: a viewer's input makes its wakeup readable, so there is nothing to
+        // check for on a timer.
         // SAFETY: `poll` reads and writes exactly the descriptors in the slice, which is owned
         // here and outlives the call.
-        let ready = unsafe { poll(watched.as_mut_ptr(), watched.len() as nfds_t, timeout) };
+        let ready = unsafe { poll(watched.as_mut_ptr(), watched.len() as nfds_t, -1) };
         if ready < 0 {
             let error = io::Error::last_os_error();
             if error.kind() == io::ErrorKind::Interrupted {
@@ -276,7 +275,7 @@ fn run() -> io::Result<()> {
 
         let mut departed = Vec::new();
         for (index, session) in sessions.iter_mut().enumerate().take(polled) {
-            if watched[index + 2].revents & (POLLIN | POLLHUP | POLLERR) == 0 {
+            if watched[index + WATCHED_LISTENERS].revents & (POLLIN | POLLHUP | POLLERR) == 0 {
                 continue;
             }
             match session.serve_one(&mut state) {
