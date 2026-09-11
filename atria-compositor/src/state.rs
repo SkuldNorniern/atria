@@ -15,7 +15,7 @@ use crate::model::{
     BufferDescriptor, BufferState, BufferTransport, Chord, ClientRequest, CommitId, ConnectionId,
     Damage, Event, EventKind, FocusEvent, InteractionKind, ObjectKind, Point, Rect,
     SeatCapabilities, SeatId, SeatSnapshot, SessionSnapshot, Size, SurfaceKey, SurfaceRole,
-    SurfaceSnapshot, TitleText, pixel_format_is_known,
+    SurfaceSnapshot, TextBuffer, TitleText, pixel_format_is_known,
 };
 use atria_protocol::interface::Interface;
 use atria_protocol::key::{Modifiers, PhysicalKey};
@@ -343,6 +343,9 @@ pub struct CompositorState {
     method: Option<(ConnectionId, ObjectId)>,
     /// The field the method is composing into, while it is.
     composing: Option<TextField>,
+    /// Which composition is live. Advances whenever one starts, so text from an older one is
+    /// recognisable as stale rather than applied to whatever is focused now.
+    composition: u32,
     next_configure: u32,
     /// Windows by the handle a shell names them with. Compositor-wide, so it outlives any one
     /// connection — including a shell's.
@@ -378,6 +381,7 @@ impl CompositorState {
             fields: BTreeMap::new(),
             method: None,
             composing: None,
+            composition: 0,
             next_configure: 1,
             toplevels: BTreeMap::new(),
             next_handle: 1,
@@ -644,26 +648,39 @@ impl CompositorState {
             }
             ClientRequest::SetPreedit {
                 method,
+                composition,
                 text,
                 cursor_begin,
                 cursor_end,
             } => {
                 self.expect_kind(connection, method, ObjectKind::InputMethod)?;
-                self.tell_field(EventKind::TextPreedit {
-                    text,
-                    cursor_begin,
-                    cursor_end,
-                });
+                self.tell_field(
+                    composition,
+                    EventKind::TextPreedit {
+                        composition,
+                        text,
+                        cursor_begin,
+                        cursor_end,
+                    },
+                );
                 Ok(())
             }
-            ClientRequest::CommitText { method, text } => {
+            ClientRequest::CommitText {
+                method,
+                composition,
+                text,
+            } => {
                 self.expect_kind(connection, method, ObjectKind::InputMethod)?;
-                self.tell_field(EventKind::TextCommit { text });
+                self.tell_field(composition, EventKind::TextCommit { composition, text });
                 Ok(())
             }
-            ClientRequest::TextDone { method, serial } => {
+            ClientRequest::TextDone {
+                method,
+                composition,
+                serial,
+            } => {
                 self.expect_kind(connection, method, ObjectKind::InputMethod)?;
-                self.tell_field(EventKind::TextDone { serial });
+                self.tell_field(composition, EventKind::TextDone { serial });
                 Ok(())
             }
             ClientRequest::RegisterShortcut {
@@ -2230,6 +2247,18 @@ impl CompositorState {
             let surface = self
                 .keyboard_focus
                 .map_or(ObjectId::NULL, |key| key.object_id);
+            // The preedit is cleared before the field is let go of. Text being composed is a
+            // proposal, and a proposal nobody is going to finish must not be left on the screen.
+            self.push_event(
+                was.connection,
+                was.object,
+                EventKind::TextPreedit {
+                    composition: self.composition,
+                    text: TextBuffer::default(),
+                    cursor_begin: -1,
+                    cursor_end: -1,
+                },
+            );
             self.push_event(was.connection, was.object, EventKind::TextLeave { surface });
             if let Some((connection, object)) = self.method {
                 self.push_event(connection, object, EventKind::MethodDeactivated);
@@ -2241,6 +2270,7 @@ impl CompositorState {
             let surface = self
                 .keyboard_focus
                 .map_or(ObjectId::NULL, |key| key.object_id);
+            self.composition = self.composition.wrapping_add(1);
             self.composing = Some(now);
             self.push_event(now.connection, now.object, EventKind::TextEnter { surface });
             self.push_event(
@@ -2249,13 +2279,21 @@ impl CompositorState {
                 EventKind::MethodActivated {
                     surface,
                     purpose: now.purpose,
+                    composition: self.composition,
                 },
             );
         }
     }
 
-    /// Send to the field the method is composing into, if there is one.
-    fn tell_field(&mut self, event: EventKind) {
+    /// Send to the field the method is composing into, if this is still that composition.
+    ///
+    /// Text naming a composition that has ended is dropped, not delivered. Without this a commit
+    /// that crossed with a focus change lands in whatever field is there now — which is how a
+    /// password ends up in a chat window.
+    fn tell_field(&mut self, composition: u32, event: EventKind) {
+        if composition != self.composition {
+            return;
+        }
         let Some(field) = self.composing else {
             return;
         };
@@ -2503,8 +2541,31 @@ impl CompositorState {
         // A holder going releases its chords, or nothing could ever claim them again.
         self.shortcuts.retain(|_, claim| claim.holder != connection);
         self.fields.retain(|(owner, _), _| *owner != connection);
+        // An input method that dies takes the composition with it. The field it was composing
+        // into is told the proposal is withdrawn, or it goes on showing text nothing will ever
+        // finish — with no way to clear it, because the program that owned it is gone.
         if self.method.is_some_and(|(owner, _)| owner == connection) {
             self.method = None;
+            if let Some(field) = self.composing.take() {
+                self.composition = self.composition.wrapping_add(1);
+                self.push_event(
+                    field.connection,
+                    field.object,
+                    EventKind::TextPreedit {
+                        composition: self.composition,
+                        text: TextBuffer::default(),
+                        cursor_begin: -1,
+                        cursor_end: -1,
+                    },
+                );
+                self.push_event(
+                    field.connection,
+                    field.object,
+                    EventKind::TextLeave {
+                        surface: ObjectId::NULL,
+                    },
+                );
+            }
         }
         if self
             .composing

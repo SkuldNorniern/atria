@@ -437,6 +437,7 @@ pub enum ClientRequest {
     /// What the input method has composed so far. Replaced wholesale by the next one.
     SetPreedit {
         method: ObjectId,
+        composition: u32,
         text: TextBuffer,
         cursor_begin: i32,
         cursor_end: i32,
@@ -444,11 +445,13 @@ pub enum ClientRequest {
     /// What the input method decided the keys became.
     CommitText {
         method: ObjectId,
+        composition: u32,
         text: TextBuffer,
     },
     /// The input method has finished one round of changes.
     TextDone {
         method: ObjectId,
+        composition: u32,
         serial: u32,
     },
     /// Give a surface window semantics. A surface may take one role.
@@ -580,11 +583,13 @@ pub enum EventKind {
         surface: ObjectId,
     },
     TextPreedit {
+        composition: u32,
         text: TextBuffer,
         cursor_begin: i32,
         cursor_end: i32,
     },
     TextCommit {
+        composition: u32,
         text: TextBuffer,
     },
     TextDone {
@@ -594,6 +599,7 @@ pub enum EventKind {
     MethodActivated {
         surface: ObjectId,
         purpose: TextPurpose,
+        composition: u32,
     },
     MethodDeactivated,
     /// A claimed chord fired.

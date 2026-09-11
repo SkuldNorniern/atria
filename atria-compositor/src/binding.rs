@@ -10,9 +10,10 @@
 
 use atria_protocol::interface::{Interface, MessageKind, Operation, decode_operation};
 use atria_protocol::message::{
-    Attach, Bind, Commit, CommitText, CreateBuffer, CreatePool, CursorArea, DamageBuffer,
-    GetRegistry, GetToplevel, GlobalName, NewId, Preedit, SeatHandle, SetTitle, ShellConfigure,
-    ShellHandle, ShellPlace, ShortcutName, ShortcutRegistration, SizeHint, TextPurpose,
+    Attach, Bind, Commit, CommitText, CompositionRound, CreateBuffer, CreatePool, CursorArea,
+    DamageBuffer, GetRegistry, GetToplevel, GlobalName, NewId, Preedit, SeatHandle, SetTitle,
+    ShellConfigure, ShellHandle, ShellPlace, ShortcutName, ShortcutRegistration, SizeHint,
+    TextPurpose,
 };
 use atria_protocol::wire::{Frame, HandleIndex};
 use atria_protocol::{DecodeError, ObjectId, Opcode};
@@ -153,16 +154,19 @@ pub enum DecodedRequest<'a> {
     },
     SetPreedit {
         method: ObjectId,
+        composition: u32,
         text: &'a str,
         cursor_begin: i32,
         cursor_end: i32,
     },
     CommitText {
         method: ObjectId,
+        composition: u32,
         text: &'a str,
     },
     TextDone {
         method: ObjectId,
+        composition: u32,
         serial: u32,
     },
     /// A shell's request, carrying a compositor-wide handle rather than an object it could name.
@@ -342,6 +346,7 @@ pub fn decode<'a>(kind: ObjectKind, frame: &Frame<'a>) -> Result<DecodedRequest<
             let payload = Preedit::decode(frame.payload)?;
             Ok(DecodedRequest::SetPreedit {
                 method: object,
+                composition: payload.composition,
                 text: payload.text,
                 cursor_begin: payload.cursor_begin,
                 cursor_end: payload.cursor_end,
@@ -351,14 +356,16 @@ pub fn decode<'a>(kind: ObjectKind, frame: &Frame<'a>) -> Result<DecodedRequest<
             let payload = CommitText::decode(frame.payload)?;
             Ok(DecodedRequest::CommitText {
                 method: object,
+                composition: payload.composition,
                 text: payload.text,
             })
         }
         Operation::InputMethodDone => {
-            let payload = GlobalName::decode(frame.payload)?;
+            let payload = CompositionRound::decode(frame.payload)?;
             Ok(DecodedRequest::TextDone {
                 method: object,
-                serial: payload.name,
+                composition: payload.composition,
+                serial: payload.serial,
             })
         }
         Operation::ShortcutsUnregister => {
@@ -576,11 +583,13 @@ pub fn resolve(
         }
         DecodedRequest::SetPreedit {
             method,
+            composition,
             text,
             cursor_begin,
             cursor_end,
         } => Ok(ClientRequest::SetPreedit {
             method,
+            composition,
             text: TextBuffer::new(text).ok_or(ResolveError::TextTooLong {
                 bytes: text.len(),
                 maximum: MAX_TEXT_BYTES,
@@ -588,16 +597,27 @@ pub fn resolve(
             cursor_begin,
             cursor_end,
         }),
-        DecodedRequest::CommitText { method, text } => Ok(ClientRequest::CommitText {
+        DecodedRequest::CommitText {
             method,
+            composition,
+            text,
+        } => Ok(ClientRequest::CommitText {
+            method,
+            composition,
             text: TextBuffer::new(text).ok_or(ResolveError::TextTooLong {
                 bytes: text.len(),
                 maximum: MAX_TEXT_BYTES,
             })?,
         }),
-        DecodedRequest::TextDone { method, serial } => {
-            Ok(ClientRequest::TextDone { method, serial })
-        }
+        DecodedRequest::TextDone {
+            method,
+            composition,
+            serial,
+        } => Ok(ClientRequest::TextDone {
+            method,
+            composition,
+            serial,
+        }),
         DecodedRequest::ShellConfigure {
             control,
             handle,

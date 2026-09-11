@@ -332,19 +332,22 @@ pub fn encode_event(event: &Event, sequence: u32, out: &mut [u8]) -> Result<usiz
             emit(object, Operation::TextInputLeave, sequence, &payload, out)
         }
         EventKind::TextPreedit {
+            composition,
             text,
             cursor_begin,
             cursor_end,
         } => {
             let payload = message::Preedit {
+                composition: *composition,
                 text: text.as_str(),
                 cursor_begin: *cursor_begin,
                 cursor_end: *cursor_end,
             };
             emit(object, Operation::TextInputPreedit, sequence, &payload, out)
         }
-        EventKind::TextCommit { text } => {
+        EventKind::TextCommit { composition, text } => {
             let payload = message::CommitText {
+                composition: *composition,
                 text: text.as_str(),
             };
             emit(object, Operation::TextInputCommit, sequence, &payload, out)
@@ -353,10 +356,15 @@ pub fn encode_event(event: &Event, sequence: u32, out: &mut [u8]) -> Result<usiz
             let payload = GlobalName { name: *serial };
             emit(object, Operation::TextInputDone, sequence, &payload, out)
         }
-        EventKind::MethodActivated { surface, purpose } => {
+        EventKind::MethodActivated {
+            surface,
+            purpose,
+            composition,
+        } => {
             let payload = message::InputMethodActivation {
                 surface: *surface,
                 purpose: purpose.into_raw(),
+                composition: *composition,
             };
             emit(
                 object,
