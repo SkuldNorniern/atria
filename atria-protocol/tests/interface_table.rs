@@ -169,6 +169,16 @@ fn the_documented_sizes_are_the_computed_sizes() {
         (Operation::ShortcutsRegister, 0x24),
         (Operation::ShortcutsUnregister, 0x10),
         (Operation::ShortcutsTriggered, 0x28),
+        (Operation::TextInputEnable, 0x10),
+        (Operation::TextInputDisable, 0x0c),
+        (Operation::TextInputSetCursorArea, 0x1c),
+        (Operation::TextInputEnter, 0x10),
+        (Operation::TextInputLeave, 0x10),
+        (Operation::TextInputDone, 0x10),
+        (Operation::InputMethodDone, 0x10),
+        (Operation::InputMethodActivate, 0x14),
+        (Operation::InputMethodDeactivate, 0x0c),
+        (Operation::InputMethodKey, 0x24),
     ];
 
     for (operation, size) in documented {
@@ -191,6 +201,10 @@ fn only_the_string_carrying_messages_are_variable_length() {
         Operation::ToplevelSetTitle,
         Operation::ShellControlToplevel,
         Operation::KeyboardEnter,
+        Operation::TextInputPreedit,
+        Operation::TextInputCommit,
+        Operation::InputMethodSetPreedit,
+        Operation::InputMethodCommit,
     ];
 
     for interface in INTERFACES {
@@ -208,8 +222,8 @@ fn only_the_string_carrying_messages_are_variable_length() {
 
 /// Every interface the draw path names is in the table exactly once.
 #[test]
-fn the_table_holds_fifteen_interfaces() {
-    assert_eq!(INTERFACES.len(), 15);
+fn the_table_holds_seventeen_interfaces() {
+    assert_eq!(INTERFACES.len(), 17);
     for (index, interface) in INTERFACES.iter().enumerate() {
         for other in &INTERFACES[index + 1..] {
             assert_ne!(interface.name(), other.name(), "duplicate interface name");

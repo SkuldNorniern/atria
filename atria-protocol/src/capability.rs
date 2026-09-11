@@ -31,6 +31,12 @@ pub enum Capability {
     InputInjection,
     /// Hold the screen against every other client, and be the only thing drawing on it.
     LockScreen,
+    /// Be the program that turns keys into text for everyone.
+    ///
+    /// An input method sees the keys of whatever holds focus while it is composing, which is the
+    /// same reach a keylogger wants. It is a system component, not something an application asks
+    /// to become.
+    InputMethod,
     /// Claim a key chord, and be told when it is pressed.
     ///
     /// Far less than observing input: the holder learns that the chord it asked for happened, and
@@ -80,6 +86,7 @@ impl Capability {
             Self::InputInjection => "input_injection",
             Self::LockScreen => "lock_screen",
             Self::ShortcutControl => "shortcut_control",
+            Self::InputMethod => "input_method",
         }
     }
 }

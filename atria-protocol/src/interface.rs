@@ -68,6 +68,12 @@ pub enum Interface {
     /// Claiming key chords. Separate from the keyboard because it is a different power: being
     /// told that one chord fired, rather than seeing everything typed.
     Shortcuts,
+    /// Text, as an application receives it. Separate from the keyboard because a key is a
+    /// position and text is what some layout, some dead-key sequence or some input method makes
+    /// of it — and for Korean or Japanese that is a conversation, not a lookup.
+    TextInput,
+    /// The other side of that conversation: the program that turns keys into text.
+    InputMethod,
 }
 
 /// Whether an operation travels from the client or to it.
@@ -181,6 +187,20 @@ pub enum Operation {
     ShortcutsRegister,
     ShortcutsUnregister,
     ShortcutsTriggered,
+    TextInputEnable,
+    TextInputDisable,
+    TextInputSetCursorArea,
+    TextInputEnter,
+    TextInputLeave,
+    TextInputPreedit,
+    TextInputCommit,
+    TextInputDone,
+    InputMethodSetPreedit,
+    InputMethodCommit,
+    InputMethodDone,
+    InputMethodActivate,
+    InputMethodDeactivate,
+    InputMethodKey,
 }
 
 /// Shorthand for one table row.
@@ -368,6 +388,42 @@ impl Operation {
                 &[U32, U64, U32, U32, U32],
             ),
             Self::ShortcutsUnregister => spec(I::Shortcuts, Method, 1, "unregister", &[U32]),
+
+            // The purpose is not decoration: an input method must not compose into a password
+            // field, and the field is the only thing that knows it is one.
+            Self::TextInputEnable => spec(I::TextInput, Method, 0, "enable", &[U32]),
+            Self::TextInputDisable => spec(I::TextInput, Method, 1, "disable", &[]),
+            // Where the caret is, so a candidate window can be put somewhere that is not over it.
+            Self::TextInputSetCursorArea => spec(
+                I::TextInput,
+                Method,
+                2,
+                "set_cursor_area",
+                &[I32, I32, U32, U32],
+            ),
+            Self::TextInputEnter => spec(I::TextInput, Event, 0, "enter", &[Object]),
+            Self::TextInputLeave => spec(I::TextInput, Event, 1, "leave", &[Object]),
+            // Text being composed, not yet text. Shown inline and replaced as it changes.
+            Self::TextInputPreedit => spec(I::TextInput, Event, 2, "preedit", &[String, I32, I32]),
+            Self::TextInputCommit => spec(I::TextInput, Event, 3, "commit", &[String]),
+            Self::TextInputDone => spec(I::TextInput, Event, 4, "done", &[U32]),
+
+            Self::InputMethodSetPreedit => spec(
+                I::InputMethod,
+                Method,
+                0,
+                "set_preedit",
+                &[String, I32, I32],
+            ),
+            Self::InputMethodCommit => spec(I::InputMethod, Method, 1, "commit", &[String]),
+            Self::InputMethodDone => spec(I::InputMethod, Method, 2, "done", &[U32]),
+            Self::InputMethodActivate => spec(I::InputMethod, Event, 0, "activate", &[Object, U32]),
+            Self::InputMethodDeactivate => spec(I::InputMethod, Event, 1, "deactivate", &[]),
+            // Keys reach the input method while it is composing, and the focused client does not
+            // see them until the method says what they became.
+            Self::InputMethodKey => {
+                spec(I::InputMethod, Event, 2, "key", &[U32, U64, U32, U32, U32])
+            }
             Self::ShortcutsTriggered => spec(
                 I::Shortcuts,
                 Event,
@@ -414,6 +470,8 @@ impl Interface {
             Self::Pointer => "atria_pointer",
             Self::Keyboard => "atria_keyboard",
             Self::Shortcuts => "atria_shortcuts",
+            Self::TextInput => "atria_text_input",
+            Self::InputMethod => "atria_input_method",
         }
     }
 
@@ -447,6 +505,16 @@ impl Interface {
             Self::Pointer => &[O::PointerDestroy],
             Self::Keyboard => &[O::KeyboardDestroy],
             Self::Shortcuts => &[O::ShortcutsRegister, O::ShortcutsUnregister],
+            Self::TextInput => &[
+                O::TextInputEnable,
+                O::TextInputDisable,
+                O::TextInputSetCursorArea,
+            ],
+            Self::InputMethod => &[
+                O::InputMethodSetPreedit,
+                O::InputMethodCommit,
+                O::InputMethodDone,
+            ],
             Self::ShellControl => &[
                 O::ShellControlConfigure,
                 O::ShellControlPlace,
@@ -472,6 +540,18 @@ impl Interface {
             Self::Toplevel => &[O::ToplevelConfigure, O::ToplevelClose],
             Self::Seat => &[],
             Self::Shortcuts => &[O::ShortcutsTriggered],
+            Self::TextInput => &[
+                O::TextInputEnter,
+                O::TextInputLeave,
+                O::TextInputPreedit,
+                O::TextInputCommit,
+                O::TextInputDone,
+            ],
+            Self::InputMethod => &[
+                O::InputMethodActivate,
+                O::InputMethodDeactivate,
+                O::InputMethodKey,
+            ],
             Self::Keyboard => &[
                 O::KeyboardEnter,
                 O::KeyboardLeave,
@@ -544,6 +624,8 @@ pub const INTERFACES: &[Interface] = &[
     Interface::Pointer,
     Interface::Keyboard,
     Interface::Shortcuts,
+    Interface::TextInput,
+    Interface::InputMethod,
 ];
 
 /// The states a toplevel may be told it is in.
