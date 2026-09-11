@@ -7,6 +7,7 @@ use atria_compositor::{
 };
 use atria_protocol::ObjectId;
 use atria_protocol::capability::{Capability, CapabilitySet};
+use atria_protocol::interface::Interface;
 
 fn id(raw: u32) -> ObjectId {
     ObjectId::from_raw(raw)
@@ -46,7 +47,7 @@ fn window(state: &mut CompositorState, side: u32, at: Point) -> (ConnectionId, S
         .find_map(|event| match event.kind {
             EventKind::Global {
                 name,
-                interface: atria_protocol::interface::Interface::Seat,
+                interface: Interface::Seat,
                 ..
             } => Some(name),
             _ => None,
@@ -262,7 +263,7 @@ fn a_press_tells_the_shell_which_window_without_telling_it_the_input() {
         .find_map(|event| match event.kind {
             EventKind::Global {
                 name,
-                interface: atria_protocol::interface::Interface::ShellControl,
+                interface: Interface::ShellControl,
                 ..
             } => Some(name),
             _ => None,
