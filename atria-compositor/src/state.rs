@@ -751,7 +751,22 @@ impl CompositorState {
             frame_callback,
             frame_serial,
         });
+        self.map(key);
         Ok(())
+    }
+
+    /// Put a surface that now has content into the scene, if it is not there already.
+    ///
+    /// Content is what makes a surface part of the scene. Nothing else can do it: with no shell
+    /// attached there is no component whose job is placing windows, and a compositor that showed
+    /// nothing until one arrived would not compose without a shell. The origin is where a surface
+    /// starts, and a shell that cares moves it.
+    fn map(&mut self, surface: SurfaceKey) {
+        if self.scene.stack.contains(&surface) {
+            return;
+        }
+        self.scene.positions.entry(surface).or_default();
+        self.scene.stack.push(surface);
     }
 
     fn set_role(

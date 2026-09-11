@@ -762,3 +762,63 @@ fn closing_a_connection_reports_its_objects_without_queuing_events_for_it() {
         "nothing is queued for a connection that has been removed"
     );
 }
+
+#[test]
+fn a_committed_surface_is_in_the_scene_with_no_shell_attached() {
+    let mut state = state_with_limits(ConnectionLimits::default());
+    let client = connect(&mut state);
+    create_session(&mut state, client, 9);
+    create_surface(&mut state, client, 257);
+    import_buffer(&mut state, client, 300);
+
+    assert!(
+        state.stacking_order().is_empty(),
+        "a surface with no content is not in the scene"
+    );
+
+    attach_and_commit(&mut state, client, 257, 300);
+
+    let key = SurfaceKey {
+        connection: client,
+        object_id: id(257),
+    };
+    assert_eq!(
+        state.stacking_order(),
+        [key],
+        "content is what puts a surface in the scene, and nothing else is attached to do it"
+    );
+    assert_eq!(
+        state.surface_position(key),
+        Some(Point::default()),
+        "a surface starts at the origin until something places it"
+    );
+}
+
+#[test]
+fn placing_a_surface_survives_a_later_commit() {
+    let mut state = state_with_limits(ConnectionLimits::default());
+    let client = connect(&mut state);
+    create_session(&mut state, client, 9);
+    create_surface(&mut state, client, 257);
+    import_buffer(&mut state, client, 300);
+    attach_and_commit(&mut state, client, 257, 300);
+
+    let key = SurfaceKey {
+        connection: client,
+        object_id: id(257),
+    };
+    state
+        .place_surface(key, Point { x: 40, y: 25 })
+        .unwrap_or_else(|error| panic!("a placement must succeed: {error:?}"));
+
+    state
+        .release_buffer(client, id(300))
+        .unwrap_or_else(|error| panic!("a release must succeed: {error:?}"));
+    attach_and_commit(&mut state, client, 257, 300);
+
+    assert_eq!(
+        state.surface_position(key),
+        Some(Point { x: 40, y: 25 }),
+        "drawing again does not move a window back to the origin"
+    );
+}
