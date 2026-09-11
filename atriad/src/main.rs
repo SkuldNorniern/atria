@@ -50,8 +50,6 @@ const OUTPUT_REFRESH_MILLIHERTZ: u32 = 60_000;
 /// Descriptors watched before the sessions: the two listeners and the viewer's wakeup.
 const WATCHED_LISTENERS: usize = 3;
 
-/// The button a viewer's primary click reports as.
-const PRIMARY_BUTTON: u32 = 1;
 const OUTPUT_MILLIMETRES: Size = Size {
     width: 340,
     height: 190,
@@ -179,7 +177,6 @@ fn run() -> io::Result<()> {
     // measured a real one — calling this nanoseconds would be a timing claim with nothing
     // behind it.
     let mut clock = 0_u64;
-    let mut pressed = false;
 
     loop {
         // One wait covers the listener and every client. Serving clients in turn instead would
@@ -254,25 +251,25 @@ fn run() -> io::Result<()> {
 
         let mut dispatched = false;
         if let Some(sink) = viewer.as_ref() {
+            // Input was lost, so what the compositor believes about held keys and buttons no
+            // longer matches the device. A new routing epoch says so rather than guessing.
+            if sink.overflowed() {
+                eprintln!("atriad: input was lost; starting a new routing epoch");
+                state.reset_pointer();
+                dispatched = true;
+            }
             for report in sink.take_input() {
                 clock = clock.saturating_add(1);
                 match report {
-                    Input::Pointer(moved) => {
-                        state.move_pointer(
-                            Point {
-                                x: moved.x,
-                                y: moved.y,
-                            },
-                            clock,
-                        );
-                        // A report is the whole state of the pointer, so only a change is an
-                        // event. Resending a press already down would be a second press.
-                        let primary = moved.buttons & 1 != 0;
-                        if primary != pressed {
-                            pressed = primary;
-                            clock = clock.saturating_add(1);
-                            state.pointer_button(PRIMARY_BUTTON, primary, clock);
-                        }
+                    Input::Pointer(moved) => state.move_pointer(
+                        Point {
+                            x: moved.x,
+                            y: moved.y,
+                        },
+                        clock,
+                    ),
+                    Input::Button(button) => {
+                        state.pointer_button(button.button, button.pressed, clock);
                     }
                     Input::Key(key) => {
                         state.key(PhysicalKey::from_usage(key.usage), key.pressed, clock);
