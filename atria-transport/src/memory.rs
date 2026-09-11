@@ -13,11 +13,19 @@ use libc::{S_IFMT, S_IFREG, c_void, fstat, off_t, pread, stat};
 
 use atria_compositor::SharedMemory;
 
+use crate::SharedMemorySource;
+
 /// Descriptors adopted from messages, keyed by the identity the compositor holds.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SharedMemoryStore {
     next_id: u64,
     live: BTreeMap<u64, OwnedFd>,
+}
+
+impl Default for SharedMemoryStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SharedMemoryStore {
@@ -39,7 +47,7 @@ impl SharedMemoryStore {
     ///
     /// Returns the platform's error when the descriptor cannot be measured, or when it is not a
     /// regular sized object — a socket or a pipe has no size to carve buffers out of.
-    pub fn adopt(&mut self, handle: OwnedFd) -> io::Result<SharedMemory> {
+    fn adopt_handle(&mut self, handle: OwnedFd) -> io::Result<SharedMemory> {
         let size = measure(&handle)?;
         let id = self.next_id;
         self.next_id = self
@@ -61,7 +69,7 @@ impl SharedMemoryStore {
     ///
     /// Returns the platform's error, or `UnexpectedEof` when the region is no longer backed by as
     /// much memory as the buffer claims.
-    pub fn read(&self, memory: SharedMemory, offset: u32, len: usize) -> io::Result<Vec<u8>> {
+    fn read_at(&self, memory: SharedMemory, offset: u32, len: usize) -> io::Result<Vec<u8>> {
         let handle = self
             .live
             .get(&memory.id())
@@ -90,21 +98,26 @@ impl SharedMemoryStore {
         }
         Ok(bytes)
     }
+}
 
-    /// Release what an identity named. Returns whether it was held.
-    pub fn release(&mut self, memory: SharedMemory) -> bool {
+impl SharedMemorySource for SharedMemoryStore {
+    type Handle = OwnedFd;
+    type Error = io::Error;
+
+    fn adopt(&mut self, handle: OwnedFd) -> io::Result<SharedMemory> {
+        self.adopt_handle(handle)
+    }
+
+    fn read(&self, memory: SharedMemory, offset: u32, len: usize) -> io::Result<Vec<u8>> {
+        self.read_at(memory, offset, len)
+    }
+
+    fn release(&mut self, memory: SharedMemory) -> bool {
         self.live.remove(&memory.id()).is_some()
     }
 
-    /// How many descriptors this store holds.
-    #[must_use]
-    pub fn len(&self) -> usize {
+    fn len(&self) -> usize {
         self.live.len()
-    }
-
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.live.is_empty()
     }
 }
 
