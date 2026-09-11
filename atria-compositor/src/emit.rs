@@ -243,16 +243,43 @@ pub fn encode_event(event: &Event, sequence: u32, out: &mut [u8]) -> Result<usiz
             handle,
             serial,
             kind,
+            position,
         } => {
             let payload = message::ShellInteraction {
                 seat: seat.0,
                 handle: handle.0,
                 serial: *serial,
                 kind: kind.into_raw(),
+                x: position.x,
+                y: position.y,
             };
             emit(
                 object,
                 Operation::ShellControlInteraction,
+                sequence,
+                &payload,
+                out,
+            )
+        }
+        EventKind::ShellGrabMotion { seat, position } => {
+            let payload = message::SeatPoint {
+                seat: seat.0,
+                x: position.x,
+                y: position.y,
+            };
+            emit(
+                object,
+                Operation::ShellControlGrabMotion,
+                sequence,
+                &payload,
+                out,
+            )
+        }
+        EventKind::ShellGrabEnd { seat } => {
+            let payload = message::SeatName { seat: seat.0 };
+            emit(
+                object,
+                Operation::ShellControlGrabEnd,
                 sequence,
                 &payload,
                 out,

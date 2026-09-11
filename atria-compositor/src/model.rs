@@ -331,6 +331,16 @@ pub enum ClientRequest {
         control: ObjectId,
         handle: ToplevelHandle,
     },
+    /// A shell asking to hold the pointer until the button that started it comes up.
+    ///
+    /// Bounded by the button deliberately. A shell that could hold the pointer for as long as it
+    /// liked would be able to watch everything a person did, which is a different power from
+    /// being able to move a window.
+    ShellGrab {
+        control: ObjectId,
+        seat: SeatId,
+        handle: ToplevelHandle,
+    },
     /// Ask a seat for its pointing device.
     GetPointer {
         seat: ObjectId,
@@ -464,6 +474,17 @@ pub enum EventKind {
         handle: ToplevelHandle,
         serial: u32,
         kind: InteractionKind,
+        /// Where in the window it happened, in the window's own coordinates.
+        position: Point,
+    },
+    /// Where the pointer went while the shell held it.
+    ShellGrabMotion {
+        seat: SeatId,
+        position: Point,
+    },
+    /// The shell no longer holds the pointer.
+    ShellGrabEnd {
+        seat: SeatId,
     },
     /// Which display a bound output object names.
     OutputIdentity {

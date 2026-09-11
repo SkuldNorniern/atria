@@ -142,6 +142,11 @@ pub enum DecodedRequest<'a> {
         control: ObjectId,
         handle: ToplevelHandle,
     },
+    ShellGrab {
+        control: ObjectId,
+        seat: SeatId,
+        handle: ToplevelHandle,
+    },
     SetMinSize {
         toplevel: ObjectId,
         size: Size,
@@ -285,6 +290,14 @@ pub fn decode<'a>(kind: ObjectKind, frame: &Frame<'a>) -> Result<DecodedRequest<
             let payload = ShellHandle::decode(frame.payload)?;
             Ok(DecodedRequest::ShellClose {
                 control: object,
+                handle: ToplevelHandle(payload.handle),
+            })
+        }
+        Operation::ShellControlGrab => {
+            let payload = SeatHandle::decode(frame.payload)?;
+            Ok(DecodedRequest::ShellGrab {
+                control: object,
+                seat: SeatId(payload.seat),
                 handle: ToplevelHandle(payload.handle),
             })
         }
@@ -448,6 +461,15 @@ pub fn resolve(
         DecodedRequest::ShellClose { control, handle } => {
             Ok(ClientRequest::ShellClose { control, handle })
         }
+        DecodedRequest::ShellGrab {
+            control,
+            seat,
+            handle,
+        } => Ok(ClientRequest::ShellGrab {
+            control,
+            seat,
+            handle,
+        }),
         DecodedRequest::SetMinSize { toplevel, size } => {
             Ok(ClientRequest::SetMinSize { toplevel, size })
         }

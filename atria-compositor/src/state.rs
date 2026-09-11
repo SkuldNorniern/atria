@@ -264,6 +264,12 @@ struct PointerRouting {
     epoch: u32,
     /// Distinguishes one event from another for a client that must quote one back.
     serial: u32,
+    /// The shell holding the pointer, if one asked for it.
+    ///
+    /// Set by a shell during a press it was told about, and cleared when the button comes up.
+    /// While it is set the client sees nothing: a window being dragged is not a window being
+    /// used, and sending it motion it cannot act on would be sending it a lie.
+    shell_grab: Option<(ConnectionId, ObjectId)>,
 }
 
 /// A global the registry advertises: what it offers, and up to which version.
@@ -686,6 +692,13 @@ impl CompositorState {
                 .map_err(|error| shell_refusal(error, control)),
             ClientRequest::ShellClose { control, handle } => self
                 .shell_close(connection, handle)
+                .map_err(|error| shell_refusal(error, control)),
+            ClientRequest::ShellGrab {
+                control,
+                seat,
+                handle,
+            } => self
+                .shell_grab(connection, seat, handle, control)
                 .map_err(|error| shell_refusal(error, control)),
             ClientRequest::SetRole { surface, role } => self.set_role(connection, surface, role),
             ClientRequest::RequestFrame { surface, serial } => {
@@ -1807,6 +1820,13 @@ impl CompositorState {
         if let Some(target) = self.pointer.target.take() {
             self.send_pointer_leave(target);
         }
+        if let Some((connection, control)) = self.pointer.shell_grab.take() {
+            self.push_event(
+                connection,
+                control,
+                EventKind::ShellGrabEnd { seat: SeatId(1) },
+            );
+        }
         self.pointer.buttons_held = 0;
         self.pointer.epoch = self.pointer.epoch.wrapping_add(1);
     }
@@ -1817,6 +1837,15 @@ impl CompositorState {
     /// receiving motion even outside itself, and stops only when the last button comes up.
     pub fn move_pointer(&mut self, position: Point, time_ns: u64) {
         self.pointer.position = position;
+        if let Some((connection, control)) = self.pointer.shell_grab {
+            let seat = SeatId(1);
+            self.push_event(
+                connection,
+                control,
+                EventKind::ShellGrabMotion { seat, position },
+            );
+            return;
+        }
         if self.pointer.buttons_held != 0 {
             if let Some(target) = self.pointer.target {
                 self.send_pointer_motion(target, position, time_ns);
@@ -1853,6 +1882,30 @@ impl CompositorState {
             }
         }
 
+        // The shell holding the pointer is checked before anything is routed to a client: the
+        // grab took the target away, and a release that returned early here would leave the shell
+        // holding the pointer for ever.
+        if let Some((connection, control)) = self.pointer.shell_grab {
+            if !pressed {
+                self.pointer.buttons_held = self.pointer.buttons_held.saturating_sub(1);
+                if self.pointer.buttons_held == 0 {
+                    self.pointer.shell_grab = None;
+                    self.push_event(
+                        connection,
+                        control,
+                        EventKind::ShellGrabEnd { seat: SeatId(1) },
+                    );
+                    self.pointer.target = self.surface_under(self.pointer.position);
+                    if let Some(target) = self.pointer.target {
+                        self.send_pointer_enter(target, self.pointer.position);
+                    }
+                }
+            } else {
+                self.pointer.buttons_held = self.pointer.buttons_held.saturating_add(1);
+            }
+            return;
+        }
+
         let Some(target) = self.pointer.target else {
             return;
         };
@@ -1872,11 +1925,13 @@ impl CompositorState {
         if pressed {
             self.pointer.buttons_held = self.pointer.buttons_held.saturating_add(1);
             if let Some(handle) = self.handle_of_surface(target) {
+                let local = self.surface_local(target, self.pointer.position);
                 self.tell_shells(EventKind::ShellInteraction {
                     seat: SeatId(1),
                     handle,
                     serial,
                     kind: InteractionKind::PointerPress,
+                    position: local,
                 });
             }
         } else {
@@ -2534,6 +2589,37 @@ impl CompositorState {
         }))
         .map(|_| ())
         .map_err(|_| ShellError::UnknownHandle { handle })
+    }
+
+    /// Give a shell the pointer until the button that started it comes up.
+    ///
+    /// Refused when no button is down: a grab that did not begin in a press would have nothing to
+    /// end it, and a shell holding the pointer indefinitely is global input observation.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::shell_configure`], and [`ShellError::UnknownHandle`] when nothing is pressed.
+    pub fn shell_grab(
+        &mut self,
+        shell: ConnectionId,
+        seat: SeatId,
+        handle: ToplevelHandle,
+        control: ObjectId,
+    ) -> Result<(), ShellError> {
+        let _ = seat;
+        let (connection, object_id) = self.shell_target(shell, handle)?;
+        let _ = (connection, object_id);
+        if self.pointer.buttons_held == 0 {
+            return Err(ShellError::UnknownHandle { handle });
+        }
+        // The client stops seeing the pointer for the duration. It was told about the press; what
+        // follows belongs to the shell, and a client left mid-gesture would be waiting for a
+        // release that is not coming to it.
+        if let Some(target) = self.pointer.target.take() {
+            self.send_pointer_leave(target);
+        }
+        self.pointer.shell_grab = Some((shell, control));
+        Ok(())
     }
 
     /// How a shell refers to this window.
