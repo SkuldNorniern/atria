@@ -17,6 +17,16 @@ pub enum Capability {
     DrmAtomicCommit,
     DrmPageFlip,
     InputKeys,
+    /// Arrange windows: place, raise, focus, configure, close. The shell role's own authority.
+    ShellControl,
+    /// Change what a display does — mode, scale, arrangement, virtual outputs.
+    OutputControl,
+    /// Observe input the focused client does not receive. A keyboard shortcut needs this.
+    GlobalInputObservation,
+    /// Synthesise input. Accessibility and automation need it; nothing else should have it.
+    InputInjection,
+    /// Hold the screen against every other client, and be the only thing drawing on it.
+    LockScreen,
 }
 
 impl Capability {
@@ -54,6 +64,11 @@ impl Capability {
             Self::DrmAtomicCommit => "drm_atomic_commit",
             Self::DrmPageFlip => "drm_page_flip",
             Self::InputKeys => "input_keys",
+            Self::ShellControl => "shell_control",
+            Self::OutputControl => "output_control",
+            Self::GlobalInputObservation => "global_input_observation",
+            Self::InputInjection => "input_injection",
+            Self::LockScreen => "lock_screen",
         }
     }
 }
