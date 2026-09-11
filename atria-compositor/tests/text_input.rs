@@ -261,11 +261,25 @@ fn keys_reach_the_method_and_the_field_is_sent_what_they_became() {
     let mut state = server();
     let ime = method(&mut state);
     let app = application(&mut state, TextPurpose::Normal);
-    let _ = state.take_events();
+    let live = state
+        .take_events()
+        .into_iter()
+        .find_map(|event| match event.kind {
+            EventKind::MethodActivated { composition, .. } => Some(composition),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the method is told which composition it has"));
 
     state.key(PhysicalKey::from_usage(usage::A), true, 1_000);
 
     let events = drain(&mut state);
+    let composition = events
+        .iter()
+        .find_map(|(_, kind)| match kind {
+            EventKind::MethodActivated { composition, .. } => Some(*composition),
+            _ => None,
+        })
+        .unwrap_or(live);
     assert!(
         kinds(&events, ime)
             .iter()
@@ -284,6 +298,7 @@ fn keys_reach_the_method_and_the_field_is_sent_what_they_became() {
             ime,
             ClientRequest::SetPreedit {
                 method: id(3),
+                composition,
                 text: composing.clone(),
                 cursor_begin: 0,
                 cursor_end: 3,
@@ -295,6 +310,7 @@ fn keys_reach_the_method_and_the_field_is_sent_what_they_became() {
             ime,
             ClientRequest::CommitText {
                 method: id(3),
+                composition,
                 text: composing.clone(),
             },
         )
@@ -312,7 +328,7 @@ fn keys_reach_the_method_and_the_field_is_sent_what_they_became() {
     assert!(
         told.iter().any(|kind| matches!(
             kind,
-            EventKind::TextCommit { text } if text.as_str() == "한"
+            EventKind::TextCommit { text, .. } if text.as_str() == "한"
         )),
         "and then told it is text"
     );
@@ -355,6 +371,29 @@ fn focus_leaving_stops_the_composition() {
     let mut state = server();
     let ime = method(&mut state);
     let app = application(&mut state, TextPurpose::Normal);
+    let composition = state
+        .take_events()
+        .into_iter()
+        .find_map(|event| match event.kind {
+            EventKind::MethodActivated { composition, .. } => Some(composition),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the composition is named"));
+
+    // Something is being composed when the focus goes.
+    let half = TextBuffer::new("한").unwrap_or_else(|| panic!("the text fits"));
+    state
+        .dispatch(
+            ime,
+            ClientRequest::SetPreedit {
+                method: id(3),
+                composition,
+                text: half,
+                cursor_begin: 0,
+                cursor_end: 3,
+            },
+        )
+        .unwrap_or_else(|error| panic!("a preedit: {error:?}"));
     let _ = state.take_events();
 
     state
@@ -362,6 +401,19 @@ fn focus_leaving_stops_the_composition() {
         .unwrap_or_else(|error| panic!("focus leaves: {error:?}"));
 
     let events = drain(&mut state);
+    let told = kinds(&events, app);
+    // Order matters: the proposal is withdrawn before the field is let go of, so nothing is left
+    // on screen that no one is going to finish.
+    let cleared = told.iter().position(
+        |kind| matches!(kind, EventKind::TextPreedit { text, .. } if text.as_str().is_empty()),
+    );
+    let left = told
+        .iter()
+        .position(|kind| matches!(kind, EventKind::TextLeave { .. }));
+    assert!(
+        cleared.is_some_and(|at| left.is_some_and(|end| at < end)),
+        "the preedit is withdrawn, and before the leave: {told:?}"
+    );
     assert!(
         kinds(&events, app)
             .iter()
@@ -383,4 +435,105 @@ fn text_longer_than_the_protocol_carries_is_refused() {
         "an input method commits a phrase, not a document"
     );
     assert!(TextBuffer::new(&"a".repeat(4096)).is_some());
+}
+
+/// Text from a composition that has ended is dropped, not delivered.
+///
+/// An input method is a separate process: what it sends crosses with what the compositor does.
+/// A commit that was in flight when focus moved would otherwise land in whatever field is there
+/// now, which is how a password ends up in a chat window.
+#[test]
+fn text_from_a_finished_composition_never_reaches_the_next_field() {
+    let mut state = server();
+    let ime = method(&mut state);
+    let first = application(&mut state, TextPurpose::Normal);
+    let stale = state
+        .take_events()
+        .into_iter()
+        .find_map(|event| match event.kind {
+            EventKind::MethodActivated { composition, .. } => Some(composition),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the first composition is named"));
+
+    // Focus moves to a second field, which starts a composition of its own.
+    let second = application(&mut state, TextPurpose::Normal);
+    let _ = state.take_events();
+
+    // The method, which had not noticed, sends text belonging to the composition that ended.
+    let secret = TextBuffer::new("secret").unwrap_or_else(|| panic!("the text fits"));
+    state
+        .dispatch(
+            ime,
+            ClientRequest::CommitText {
+                method: id(3),
+                composition: stale,
+                text: secret,
+            },
+        )
+        .unwrap_or_else(|error| panic!("the method may speak: {error:?}"));
+
+    let events = drain(&mut state);
+    for (name, connection) in [
+        ("the field it was meant for", first),
+        ("the next field", second),
+    ] {
+        assert!(
+            !kinds(&events, connection)
+                .iter()
+                .any(|kind| matches!(kind, EventKind::TextCommit { .. })),
+            "{name} is not given text from a composition that has ended"
+        );
+    }
+}
+
+/// An input method that dies leaves no text being composed behind it.
+///
+/// The preedit is the compositor's to clear: the field cannot, because the program that proposed
+/// the text is gone. Leaving it is how a window ends up showing half a word for ever.
+#[test]
+fn a_method_that_dies_withdraws_what_it_was_proposing() {
+    let mut state = server();
+    let ime = method(&mut state);
+    let app = application(&mut state, TextPurpose::Normal);
+    let composition = state
+        .take_events()
+        .into_iter()
+        .find_map(|event| match event.kind {
+            EventKind::MethodActivated { composition, .. } => Some(composition),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the composition is named"));
+
+    let half = TextBuffer::new("한").unwrap_or_else(|| panic!("the text fits"));
+    state
+        .dispatch(
+            ime,
+            ClientRequest::SetPreedit {
+                method: id(3),
+                composition,
+                text: half,
+                cursor_begin: 0,
+                cursor_end: 3,
+            },
+        )
+        .unwrap_or_else(|error| panic!("a preedit: {error:?}"));
+    let _ = state.take_events();
+
+    state.close_connection(ime);
+
+    let events = drain(&mut state);
+    let told = kinds(&events, app);
+    assert!(
+        told.iter().any(|kind| matches!(
+            kind,
+            EventKind::TextPreedit { text, .. } if text.as_str().is_empty()
+        )),
+        "the proposal is withdrawn: {told:?}"
+    );
+    assert!(
+        told.iter()
+            .any(|kind| matches!(kind, EventKind::TextLeave { .. })),
+        "and the field is told it is no longer being composed into"
+    );
 }
