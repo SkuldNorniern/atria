@@ -12,8 +12,8 @@ use std::time::Duration;
 use atria_software_output::{Frame, FrameReport, FrameSink, SinkError};
 
 use crate::protocol::{
-    PixelFormat, SECURITY_NONE, VERSION, client_message, client_message_length, pixel_format,
-    read_exact, write_full_update,
+    PixelFormat, SECURITY_NONE, VERSION, changed_regions, client_message, client_message_length,
+    encoding, pixel_format, read_exact, write_update,
 };
 
 /// Why the framebuffer could not be served.
@@ -172,11 +172,20 @@ impl Viewer {
             let mut shown = 0;
             let mut asked = false;
             let mut format = PixelFormat::declared();
+            // What this viewer was last sent, so the next frame can be compared against it. Per
+            // viewer rather than per output: two viewers may be at different frames, and a
+            // rectangle list is only correct against the frame it was computed from.
+            let mut sent: Option<Vec<u8>> = None;
+            // Raw until the viewer says otherwise. Every viewer understands raw, and a server
+            // that assumed anything else would be unreadable to one that had not asked for it.
+            let mut hextile = false;
             loop {
                 // Read first, always. This is where a viewer's input arrives and where its
                 // departure is noticed, and a server that only read before writing would stop
                 // hearing from a viewer that had stopped asking for frames.
-                if let Err(error) = self.drain_requests(&mut stream, &mut asked, &mut format) {
+                if let Err(error) =
+                    self.drain_requests(&mut stream, &mut asked, &mut format, &mut hextile)
+                {
                     report(&error);
                     break;
                 }
@@ -186,13 +195,26 @@ impl Viewer {
                 // all.
                 if asked && let Some(frame) = self.frame_after(shown) {
                     shown = frame.0;
-                    asked = false;
-                    if let Err(error) =
-                        write_full_update(&mut stream, self.size.0, self.size.1, &frame.1, format)
-                    {
-                        report(&error);
-                        break;
+                    let regions =
+                        changed_regions(sent.as_deref(), &frame.1, self.size.0, self.size.1);
+                    // Nothing changed where this viewer could see it. Its request stays
+                    // outstanding rather than being answered with an empty update, so the next
+                    // frame that does change something reaches it without being asked again.
+                    if !regions.is_empty() {
+                        asked = false;
+                        if let Err(error) = write_update(
+                            &mut stream,
+                            &regions,
+                            &frame.1,
+                            self.size.0,
+                            format,
+                            hextile,
+                        ) {
+                            report(&error);
+                            break;
+                        }
                     }
+                    sent = Some(frame.1);
                 }
                 self.wait_briefly(shown);
             }
@@ -287,9 +309,10 @@ impl Viewer {
         stream: &mut TcpStream,
         asked: &mut bool,
         format: &mut PixelFormat,
+        hextile: &mut bool,
     ) -> io::Result<()> {
         stream.set_nonblocking(true)?;
-        let outcome = self.drain(stream, asked, format);
+        let outcome = self.drain(stream, asked, format, hextile);
         stream.set_nonblocking(false)?;
         outcome
     }
@@ -316,6 +339,7 @@ impl Viewer {
         stream: &mut TcpStream,
         asked: &mut bool,
         format: &mut PixelFormat,
+        hextile: &mut bool,
     ) -> io::Result<()> {
         loop {
             let mut number = [0_u8; 1];
@@ -332,7 +356,7 @@ impl Viewer {
             if number[0] == client_message::FRAMEBUFFER_UPDATE_REQUEST {
                 *asked = true;
             }
-            let result = self.consume_body(stream, number[0], format);
+            let result = self.consume_body(stream, number[0], format, hextile);
             stream.set_nonblocking(true)?;
             result?;
         }
@@ -343,6 +367,7 @@ impl Viewer {
         stream: &mut TcpStream,
         number: u8,
         format: &mut PixelFormat,
+        hextile: &mut bool,
     ) -> io::Result<()> {
         if let Some(length) = client_message_length(number) {
             let mut body = vec![0_u8; length];
@@ -364,7 +389,14 @@ impl Viewer {
                 stream.read_exact(&mut head)?;
                 let count = u16::from_be_bytes([head[1], head[2]]) as usize;
                 let mut body = vec![0_u8; count * 4];
-                stream.read_exact(&mut body)
+                stream.read_exact(&mut body)?;
+                // Read rather than discarded: which encodings a viewer understands is the
+                // difference between sending a window and sending four bytes per square of it.
+                *hextile = body.chunks_exact(4).any(|listed| {
+                    i32::from_be_bytes([listed[0], listed[1], listed[2], listed[3]])
+                        == encoding::HEXTILE
+                });
+                Ok(())
             }
             client_message::CLIENT_CUT_TEXT => {
                 let mut head = [0_u8; 7];

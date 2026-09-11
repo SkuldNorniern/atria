@@ -115,6 +115,11 @@ impl PixelFormat {
         (self.bits_per_pixel / 8) as usize
     }
 
+    /// Lay one of the compositor's pixels out as this format wants it.
+    pub fn write_into(&self, source: &[u8], out: &mut [u8]) {
+        self.write_pixel(source[0], source[1], source[2], out);
+    }
+
     /// Lay one colour out as this format wants it.
     fn write_pixel(&self, red: u8, green: u8, blue: u8, out: &mut [u8]) {
         let scale =
@@ -156,29 +161,209 @@ pub fn read_exact(stream: &mut impl Read, out: &mut [u8]) -> io::Result<()> {
     stream.read_exact(out)
 }
 
-/// Write a framebuffer update holding one raw rectangle covering the whole frame.
+/// A rectangle of the framebuffer, in pixels.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Region {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+}
+
+/// The side of the squares the frame is compared in.
 ///
-/// One rectangle rather than a damage list: the compositor already knows what changed, and
-/// sending everything is what keeps this tool simple enough to trust. A frame at 1920x1080 is
-/// eight megabytes, which is fine over loopback and would not be over a network.
-pub fn write_full_update(
-    stream: &mut impl Write,
+/// Comparing whole rows would send a whole row for one changed pixel; comparing single pixels
+/// would produce a rectangle list longer than the pixels it describes. Sixty-four is small enough
+/// that a moved window costs about what the window covers, and large enough that the list stays
+/// short.
+const TILE: usize = 64;
+
+/// Past this share of the frame, one rectangle covering everything is cheaper than the list.
+const WHOLESALE_TILES: usize = 2;
+
+/// Which parts of the frame differ from the one before it.
+///
+/// This is what makes the difference between sending a window and sending the screen. A frame at
+/// 1280x720 is three and a half megabytes; a window moving touches a tenth of that, and on
+/// anything slower than loopback the rest is the whole of the latency.
+///
+/// Returns one rectangle covering the frame when there is no previous frame to compare against,
+/// or when so much changed that the comparison has stopped paying for itself.
+#[must_use]
+pub fn changed_regions(
+    previous: Option<&[u8]>,
+    current: &[u8],
     width: u16,
     height: u16,
-    pixels: &[u8],
+) -> Vec<Region> {
+    let whole = vec![Region {
+        x: 0,
+        y: 0,
+        width,
+        height,
+    }];
+    let Some(previous) = previous else {
+        return whole;
+    };
+    if previous.len() != current.len() {
+        return whole;
+    }
+
+    let pixels = usize::from(width);
+    let rows = usize::from(height);
+    let across = pixels.div_ceil(TILE);
+    let down = rows.div_ceil(TILE);
+    let mut regions = Vec::new();
+    let mut changed = 0_usize;
+
+    for tile_y in 0..down {
+        let top = tile_y * TILE;
+        let bottom = (top + TILE).min(rows);
+        // Runs of adjacent changed tiles become one rectangle, so a window spanning six of them
+        // is one rectangle rather than six.
+        let mut run: Option<(usize, usize)> = None;
+        for tile_x in 0..across {
+            let left = tile_x * TILE;
+            let right = (left + TILE).min(pixels);
+            let differs = (top..bottom).any(|row| {
+                let start = (row * pixels + left) * 4;
+                let end = (row * pixels + right) * 4;
+                previous[start..end] != current[start..end]
+            });
+            match (differs, run) {
+                (true, None) => run = Some((left, right)),
+                (true, Some((start, _))) => run = Some((start, right)),
+                (false, Some((start, end))) => {
+                    changed += (end - start) * (bottom - top);
+                    regions.push(region(start, top, end, bottom));
+                    run = None;
+                }
+                (false, None) => {}
+            }
+        }
+        if let Some((start, end)) = run {
+            changed += (end - start) * (bottom - top);
+            regions.push(region(start, top, end, bottom));
+        }
+    }
+
+    if changed * WHOLESALE_TILES >= pixels * rows {
+        return whole;
+    }
+    regions
+}
+
+fn region(left: usize, top: usize, right: usize, bottom: usize) -> Region {
+    Region {
+        x: left as u16,
+        y: top as u16,
+        width: (right - left) as u16,
+        height: (bottom - top) as u16,
+    }
+}
+
+/// Encodings this server can produce, in the order it prefers them.
+pub mod encoding {
+    /// Every pixel, as it is. Every viewer supports this and no viewer has to ask for it.
+    pub const RAW: i32 = 0;
+    /// Sixteen-pixel squares, each either one colour or raw.
+    ///
+    /// A window of flat colour costs a handful of bytes per square instead of a thousand, and
+    /// content that is not flat costs one byte more than raw. There is no case where it is worse
+    /// by more than that, which is why it is worth having and compression is not yet.
+    pub const HEXTILE: i32 = 5;
+}
+
+/// The side of a hextile square, fixed by the specification.
+const HEXTILE_SIDE: usize = 16;
+
+/// Hextile subencoding bits, from the specification.
+const HEXTILE_RAW: u8 = 1;
+const HEXTILE_BACKGROUND: u8 = 2;
+
+/// Write one rectangle as hextile squares.
+fn write_hextile(
+    message: &mut Vec<u8>,
+    region: Region,
+    frame: &[u8],
+    width: u16,
     format: PixelFormat,
+) {
+    let stride = usize::from(width) * 4;
+    let pixel = format.stride();
+    let mut encoded = vec![0_u8; pixel];
+
+    let mut y = 0;
+    while y < usize::from(region.height) {
+        let tall = HEXTILE_SIDE.min(usize::from(region.height) - y);
+        let mut x = 0;
+        while x < usize::from(region.width) {
+            let wide = HEXTILE_SIDE.min(usize::from(region.width) - x);
+            let at = |row: usize, column: usize| {
+                let start = (usize::from(region.y) + y + row) * stride
+                    + (usize::from(region.x) + x + column) * 4;
+                &frame[start..start + 4]
+            };
+
+            let first = at(0, 0);
+            let uniform = (0..tall).all(|row| (0..wide).all(|column| at(row, column) == first));
+            if uniform {
+                // One colour: the square is its background and nothing else.
+                message.push(HEXTILE_BACKGROUND);
+                format.write_into(first, &mut encoded);
+                message.extend_from_slice(&encoded);
+            } else {
+                message.push(HEXTILE_RAW);
+                for row in 0..tall {
+                    for column in 0..wide {
+                        format.write_into(at(row, column), &mut encoded);
+                        message.extend_from_slice(&encoded);
+                    }
+                }
+            }
+            x += HEXTILE_SIDE;
+        }
+        y += HEXTILE_SIDE;
+    }
+}
+
+/// Write a framebuffer update holding the given rectangles.
+///
+/// # Errors
+///
+/// Returns the platform's error when the viewer cannot be written to.
+pub fn write_update(
+    stream: &mut impl Write,
+    regions: &[Region],
+    frame: &[u8],
+    width: u16,
+    format: PixelFormat,
+    hextile: bool,
 ) -> io::Result<()> {
-    let mut header = [0_u8; 16];
-    header[0] = 0; // FramebufferUpdate
-    header[1] = 0; // padding
-    header[2..4].copy_from_slice(&1_u16.to_be_bytes()); // one rectangle
-    header[4..6].copy_from_slice(&0_u16.to_be_bytes()); // x
-    header[6..8].copy_from_slice(&0_u16.to_be_bytes()); // y
-    header[8..10].copy_from_slice(&width.to_be_bytes());
-    header[10..12].copy_from_slice(&height.to_be_bytes());
-    header[12..16].copy_from_slice(&0_i32.to_be_bytes()); // raw encoding
-    stream.write_all(&header)?;
-    stream.write_all(&format.convert(pixels))?;
+    let mut message = Vec::with_capacity(4 + regions.len() * 12);
+    message.push(0); // FramebufferUpdate
+    message.push(0); // padding
+    message.extend_from_slice(&(regions.len() as u16).to_be_bytes());
+
+    let stride = usize::from(width) * 4;
+    for region in regions {
+        message.extend_from_slice(&region.x.to_be_bytes());
+        message.extend_from_slice(&region.y.to_be_bytes());
+        message.extend_from_slice(&region.width.to_be_bytes());
+        message.extend_from_slice(&region.height.to_be_bytes());
+        if hextile {
+            message.extend_from_slice(&encoding::HEXTILE.to_be_bytes());
+            write_hextile(&mut message, *region, frame, width, format);
+            continue;
+        }
+        message.extend_from_slice(&encoding::RAW.to_be_bytes());
+        for row in 0..usize::from(region.height) {
+            let start = (usize::from(region.y) + row) * stride + usize::from(region.x) * 4;
+            let end = start + usize::from(region.width) * 4;
+            message.extend_from_slice(&format.convert(&frame[start..end]));
+        }
+    }
+    stream.write_all(&message)?;
     stream.flush()
 }
 
