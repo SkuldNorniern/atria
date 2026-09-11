@@ -62,7 +62,7 @@ impl SoftwareOutput {
         buffers: &BufferStore,
         timestamp_ns: u64,
     ) -> Result<FrameReport, ComposeError> {
-        let mut staged_surfaces = self.surfaces.clone();
+        let layout = self.frame.layout();
         let mut active = BTreeSet::new();
         let mut consumed = Vec::new();
         let mut damage_count = 0_usize;
@@ -78,7 +78,8 @@ impl SoftwareOutput {
             };
             checked_origin(surface, position, snapshot.offset)?;
 
-            if staged_surfaces
+            if self
+                .surfaces
                 .get(&surface)
                 .is_some_and(|image| image.commit == snapshot.commit)
             {
@@ -103,10 +104,10 @@ impl SoftwareOutput {
             if buffer.descriptor() != descriptor {
                 return Err(ComposeError::BufferDescriptorMismatch(buffer_key));
             }
-            if buffer.layout() != self.frame.layout() {
+            if buffer.layout() != layout {
                 return Err(ComposeError::PixelLayoutMismatch {
                     buffer: buffer_key,
-                    expected: self.frame.layout(),
+                    expected: layout,
                     actual: buffer.layout(),
                 });
             }
@@ -123,76 +124,76 @@ impl SoftwareOutput {
                     });
                 }
             }
-            validate_for_layout(descriptor, self.frame.layout(), buffer.bytes().len()).map_err(
-                |error| ComposeError::InvalidBuffer {
+            validate_for_layout(descriptor, layout, buffer.bytes().len()).map_err(|error| {
+                ComposeError::InvalidBuffer {
                     buffer: buffer_key,
                     error,
-                },
-            )?;
+                }
+            })?;
             validate_damage(surface, descriptor.size, &snapshot.damage)?;
 
-            let replace_all = staged_surfaces
+            let replace_all = self
+                .surfaces
                 .get(&surface)
                 .is_none_or(|image| image.size != descriptor.size);
-            let byte_len =
-                tight_byte_len(descriptor.size, self.frame.layout()).map_err(|error| {
-                    ComposeError::InvalidBuffer {
-                        buffer: buffer_key,
-                        error,
-                    }
-                })?;
-            let image = staged_surfaces
-                .entry(surface)
-                .or_insert_with(|| SurfaceImage {
-                    commit: snapshot.commit,
-                    size: descriptor.size,
-                    bytes: vec![0; byte_len],
-                });
+            let byte_len = tight_byte_len(descriptor.size, layout).map_err(|error| {
+                ComposeError::InvalidBuffer {
+                    buffer: buffer_key,
+                    error,
+                }
+            })?;
+            let tight = tight_stride(descriptor.size, layout)?;
+            let whole = Rect {
+                x: 0,
+                y: 0,
+                width: descriptor.size.width,
+                height: descriptor.size.height,
+            };
             if replace_all {
-                image.size = descriptor.size;
-                image.bytes.resize(byte_len, 0);
-            }
-            if replace_all {
+                // Moved in whole, so a failed copy leaves no size disagreeing with its bytes.
+                let mut bytes = vec![0; byte_len];
                 copy_rect(
                     buffer.bytes(),
                     descriptor.stride,
-                    &mut image.bytes,
-                    tight_stride(descriptor.size, self.frame.layout())?,
-                    self.frame.layout(),
-                    Rect {
-                        x: 0,
-                        y: 0,
-                        width: descriptor.size.width,
-                        height: descriptor.size.height,
-                    },
+                    &mut bytes,
+                    tight,
+                    layout,
+                    whole,
                 )?;
+                self.surfaces.insert(
+                    surface,
+                    SurfaceImage {
+                        commit: snapshot.commit,
+                        size: descriptor.size,
+                        bytes,
+                    },
+                );
             } else {
+                let image = self
+                    .surfaces
+                    .get_mut(&surface)
+                    .ok_or(ComposeError::MissingSurfaceState(surface))?;
                 for damage in &snapshot.damage {
                     let rect = match *damage {
-                        Damage::Full => Rect {
-                            x: 0,
-                            y: 0,
-                            width: descriptor.size.width,
-                            height: descriptor.size.height,
-                        },
+                        Damage::Full => whole,
                         Damage::Rect(rect) => rect,
                     };
                     copy_rect(
                         buffer.bytes(),
                         descriptor.stride,
                         &mut image.bytes,
-                        tight_stride(descriptor.size, self.frame.layout())?,
-                        self.frame.layout(),
+                        tight,
+                        layout,
                         rect,
                     )?;
                 }
+                image.commit = snapshot.commit;
             }
-            image.commit = snapshot.commit;
             damage_count = damage_count.saturating_add(snapshot.damage.len());
             consumed.push((surface, snapshot.buffer));
         }
 
-        staged_surfaces.retain(|surface, _| active.contains(surface));
+        self.surfaces.retain(|surface, _| active.contains(surface));
         // Into the kept frame, then swapped in.
         self.spare.clear();
         for &surface in state.stacking_order() {
@@ -202,7 +203,8 @@ impl SoftwareOutput {
             let position = state
                 .surface_position(surface)
                 .ok_or(ComposeError::MissingSurfacePosition(surface))?;
-            let image = staged_surfaces
+            let image = self
+                .surfaces
                 .get(&surface)
                 .ok_or(ComposeError::MissingSurfaceState(surface))?;
             blit_surface(surface, image, position, snapshot.offset, &mut self.spare)?;
@@ -219,12 +221,11 @@ impl SoftwareOutput {
 
         let report = FrameReport {
             timestamp_ns,
-            surfaces_composited: staged_surfaces.len(),
+            surfaces_composited: self.surfaces.len(),
             commits_consumed: consumed.len(),
             damage_rectangles_consumed: damage_count,
             bytes_written: self.spare.bytes().len(),
         };
-        self.surfaces = staged_surfaces;
         swap(&mut self.frame, &mut self.spare);
         Ok(report)
     }
