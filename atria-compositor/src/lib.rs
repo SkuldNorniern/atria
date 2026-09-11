@@ -10,6 +10,7 @@
 extern crate alloc;
 
 mod binding;
+mod emit;
 mod error;
 mod model;
 mod output;
@@ -18,6 +19,7 @@ mod resolve;
 mod state;
 
 pub use binding::{BindError, DecodedRequest, decode, interface_of, resolve};
+pub use emit::{EmitError, encode_event};
 pub use error::{ErrorCode, StateError};
 pub use model::{
     BufferDescriptor, BufferState, BufferTransport, ClientRequest, CommitId, ConnectionId, Damage,

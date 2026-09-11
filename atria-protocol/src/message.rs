@@ -347,6 +347,39 @@ impl EncodePayload for Commit {
     }
 }
 
+/// `atria_surface.frame_done` payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FrameDone {
+    pub serial: u32,
+    pub timestamp_ns: u64,
+}
+
+impl FrameDone {
+    pub fn decode(input: &[u8]) -> Result<Self, DecodeError> {
+        let mut decoder = Decoder::new(input);
+        let serial = decoder.read_u32()?;
+        let low = u64::from(decoder.read_u32()?);
+        let high = u64::from(decoder.read_u32()?);
+        decoder.finish()?;
+        Ok(Self {
+            serial,
+            timestamp_ns: low | (high << 32),
+        })
+    }
+}
+
+impl EncodePayload for FrameDone {
+    fn encoded_len(&self) -> Result<usize, EncodeError> {
+        Ok(12)
+    }
+
+    fn encode(&self, encoder: &mut Encoder<'_>) -> Result<(), EncodeError> {
+        encoder.write_u32(self.serial)?;
+        encoder.write_u32(self.timestamp_ns as u32)?;
+        encoder.write_u32((self.timestamp_ns >> 32) as u32)
+    }
+}
+
 /// `atria_shm.create_pool` payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CreatePool {
