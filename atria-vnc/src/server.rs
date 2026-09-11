@@ -6,6 +6,7 @@ use std::io::{self, ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread;
+use std::time::Duration;
 
 use atria_software_output::{Frame, FrameReport, FrameSink, SinkError};
 
@@ -135,7 +136,15 @@ impl Viewer {
             // current state whether or not anything changed while somebody was watching.
             let mut shown = 0;
             loop {
-                let frame = self.wait_for_frame(shown);
+                // A viewer that goes away while nothing is being composed must still be noticed,
+                // or the next viewer waits behind a connection nobody is on the other end of.
+                // The wait is bounded so departure is found by reading, not by failing to write.
+                let Some(frame) = self.wait_for_frame(shown) else {
+                    if Self::drain_requests(&mut stream).is_err() {
+                        break;
+                    }
+                    continue;
+                };
                 shown = frame.0;
                 let written = Self::drain_requests(&mut stream).and_then(|()| {
                     write_full_update(&mut stream, self.size.0, self.size.1, &frame.1)
@@ -146,22 +155,31 @@ impl Viewer {
             }
         }
     }
+}
 
-    /// Block until a frame newer than `shown` exists, then take a copy of it.
-    fn wait_for_frame(&self, shown: u64) -> (u64, Vec<u8>) {
+/// How long the viewer waits for a new frame before checking its connection is still there.
+const DEPARTURE_CHECK: Duration = Duration::from_millis(200);
+
+impl Viewer {
+    /// Wait for a frame newer than `shown`, or return nothing so the caller can check the peer.
+    fn wait_for_frame(&self, shown: u64) -> Option<(u64, Vec<u8>)> {
         let mut held = self
             .latest
             .frame
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         while held.0 == shown || held.1.is_empty() {
-            held = self
+            let (next, timeout) = self
                 .latest
                 .composed
-                .wait(held)
+                .wait_timeout(held, DEPARTURE_CHECK)
                 .unwrap_or_else(PoisonError::into_inner);
+            if timeout.timed_out() {
+                return None;
+            }
+            held = next;
         }
-        (held.0, held.1.clone())
+        Some((held.0, held.1.clone()))
     }
 
     /// RFB 3.8: version, security, then the server's description of the framebuffer.
