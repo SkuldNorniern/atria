@@ -10,6 +10,7 @@ use atria_protocol::opcode::Opcode;
 
 use crate::output::IdentitySource;
 use crate::resolve::SharedMemory;
+use crate::shell::ToplevelHandle;
 
 use crate::error::StateError;
 
@@ -44,6 +45,8 @@ pub enum ObjectKind {
     Buffer,
     Fence,
     InputStream,
+    /// The authority to arrange every window, bound from the registry by a shell.
+    ShellControl,
     /// A display, bound from the registry. One global per display, because a client learns which
     /// displays exist the same way it learns everything else exists.
     Output,
@@ -275,6 +278,31 @@ pub enum ClientRequest {
         new_id: ObjectId,
         descriptor: BufferDescriptor,
     },
+    /// A shell asking a window to adopt a size and states. The handle is compositor-wide, because
+    /// a shell has never seen the object identifiers of the clients it arranges.
+    ShellConfigure {
+        control: ObjectId,
+        handle: ToplevelHandle,
+        size: Size,
+        state: u32,
+    },
+    ShellPlace {
+        control: ObjectId,
+        handle: ToplevelHandle,
+        position: Point,
+    },
+    ShellRaise {
+        control: ObjectId,
+        handle: ToplevelHandle,
+    },
+    ShellFocus {
+        control: ObjectId,
+        handle: ToplevelHandle,
+    },
+    ShellClose {
+        control: ObjectId,
+        handle: ToplevelHandle,
+    },
     /// Give a surface window semantics. A surface may take one role.
     GetToplevel {
         surface: ObjectId,
@@ -389,6 +417,28 @@ pub enum EventKind {
         numerator: u32,
         denominator: u32,
     },
+    /// A window a shell is told about, by the handle it uses to name it.
+    ///
+    /// The same event whether the window existed before the shell attached or appeared after.
+    /// What separates those is the snapshot boundary, so a second event carrying the same fields
+    /// would say nothing the boundary does not.
+    ShellToplevel {
+        handle: ToplevelHandle,
+        title: String,
+    },
+    /// A window a shell was told about has gone.
+    ShellToplevelGone {
+        handle: ToplevelHandle,
+    },
+    /// Keyboard focus moved. A null handle means nothing holds it.
+    ShellFocusChanged {
+        handle: ToplevelHandle,
+    },
+    /// Everything the shell was told before this is the state as it stood when it attached.
+    ///
+    /// A shell that had to enumerate the world and receive changes at the same time would race
+    /// the compositor for its own starting picture. This is the line between the two.
+    ShellSnapshotDone,
     /// Everything above describes one consistent state of the display.
     ///
     /// The properties arrive as separate events, so a client that acted on each as it came would

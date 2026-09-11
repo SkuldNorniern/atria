@@ -146,6 +146,42 @@ pub fn encode_event(event: &Event, sequence: u32, out: &mut [u8]) -> Result<usiz
             emit(object, Operation::OutputScale, sequence, &payload, out)
         }
         EventKind::OutputDone => emit_empty(object, Operation::OutputDone, sequence, out),
+        EventKind::ShellToplevel { handle, title } => {
+            let payload = message::ShellToplevel {
+                handle: handle.0,
+                title,
+            };
+            emit(
+                object,
+                Operation::ShellControlToplevel,
+                sequence,
+                &payload,
+                out,
+            )
+        }
+        EventKind::ShellToplevelGone { handle } => {
+            let payload = message::ShellHandle { handle: handle.0 };
+            emit(
+                object,
+                Operation::ShellControlToplevelGone,
+                sequence,
+                &payload,
+                out,
+            )
+        }
+        EventKind::ShellFocusChanged { handle } => {
+            let payload = message::ShellHandle { handle: handle.0 };
+            emit(
+                object,
+                Operation::ShellControlFocusChanged,
+                sequence,
+                &payload,
+                out,
+            )
+        }
+        EventKind::ShellSnapshotDone => {
+            emit_empty(object, Operation::ShellControlSnapshotDone, sequence, out)
+        }
         EventKind::Configure {
             serial,
             size,

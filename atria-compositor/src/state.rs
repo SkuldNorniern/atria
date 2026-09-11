@@ -618,6 +618,33 @@ impl CompositorState {
             } => self.attach(connection, surface, buffer, offset, acquire_fence),
             ClientRequest::Damage { surface, rect } => self.damage(connection, surface, rect),
             ClientRequest::Commit { surface } => self.commit(connection, surface),
+            // A shell's requests carry a compositor-wide handle, and every one re-checks the
+            // grant. Checking once at bind would leave a revoked shell still arranging windows.
+            ClientRequest::ShellConfigure {
+                control,
+                handle,
+                size,
+                state,
+            } => self
+                .shell_configure(connection, handle, size, state)
+                .map(|_| ())
+                .map_err(|error| shell_refusal(error, control)),
+            ClientRequest::ShellPlace {
+                control,
+                handle,
+                position,
+            } => self
+                .shell_place(connection, handle, position)
+                .map_err(|error| shell_refusal(error, control)),
+            ClientRequest::ShellRaise { control, handle } => self
+                .shell_raise(connection, handle)
+                .map_err(|error| shell_refusal(error, control)),
+            ClientRequest::ShellFocus { control, handle } => self
+                .shell_focus(connection, handle)
+                .map_err(|error| shell_refusal(error, control)),
+            ClientRequest::ShellClose { control, handle } => self
+                .shell_close(connection, handle)
+                .map_err(|error| shell_refusal(error, control)),
             ClientRequest::SetRole { surface, role } => self.set_role(connection, surface, role),
             ClientRequest::RequestFrame { surface, serial } => {
                 self.request_frame(connection, surface, serial)
@@ -1386,6 +1413,47 @@ impl CompositorState {
         self.push_event(connection, object, EventKind::OutputDone);
     }
 
+    /// Tell a shell the world as it stands, then say the telling is over.
+    ///
+    /// A shell attaching to a compositor that has been running finds windows already there. It is
+    /// told about each by handle, and then told the snapshot is complete — after which the same
+    /// events mean "this just happened". Without that boundary a shell would have to enumerate
+    /// the world and receive changes to it at the same time, and race the compositor for its own
+    /// starting picture.
+    ///
+    /// This is what makes a replacement shell possible at all: it is the difference between
+    /// restarting the shell and restarting the session.
+    fn snapshot_for_shell(&mut self, connection: ConnectionId, control: ObjectId) {
+        for record in self.shell_toplevels() {
+            self.push_event(
+                connection,
+                control,
+                EventKind::ShellToplevel {
+                    handle: record.handle,
+                    title: record.title,
+                },
+            );
+        }
+        // The shell is told which window holds focus, not which surface: a surface is a client's
+        // own object and the shell has never seen its identifier.
+        let focused = self.keyboard_focus.and_then(|surface| {
+            self.shell_toplevels().into_iter().find_map(|record| {
+                (record.connection == surface.connection
+                    && self.toplevel_surface(record.connection, record.object_id)
+                        == Some(surface.object_id))
+                .then_some(record.handle)
+            })
+        });
+        self.push_event(
+            connection,
+            control,
+            EventKind::ShellFocusChanged {
+                handle: focused.unwrap_or(ToplevelHandle(0)),
+            },
+        );
+        self.push_event(connection, control, EventKind::ShellSnapshotDone);
+    }
+
     /// Tell every connection one global exists. Used when one appears after clients have bound.
     fn announce_global(&mut self, name: u32) {
         let Some(global) = self.globals.get(&name).copied() else {
@@ -1459,11 +1527,26 @@ impl CompositorState {
         if version == 0 || version > global.version {
             return Err(StateError::InvalidState { object_id: new_id });
         }
+        // The authority to arrange every window is not something binding confers. Refusing here
+        // as well as on each request means an ungranted program never holds the object at all.
+        if global.kind == ObjectKind::ShellControl
+            && !self
+                .capabilities(connection)
+                .is_some_and(|held| held.contains(Capability::ShellControl))
+        {
+            return Err(StateError::UnsupportedCapability {
+                object_id: new_id,
+                capability: Capability::ShellControl,
+            });
+        }
         self.allocate_client(connection, new_id, global.kind, Object::Global)?;
         // A bound display describes itself immediately. A client that had to ask would have a
         // window on an output whose size it does not yet know.
         if global.kind == ObjectKind::Output {
             self.describe_output(connection, new_id, name);
+        }
+        if global.kind == ObjectKind::ShellControl {
+            self.snapshot_for_shell(connection, new_id);
         }
         Ok(())
     }
@@ -2383,5 +2466,20 @@ impl CompositorState {
         self.connections
             .get_mut(&id)
             .ok_or(StateError::ConnectionClosed)
+    }
+}
+
+/// A shell's refusal, as an error the connection can be told about.
+///
+/// Neither case says anything about the window. A connection without the grant learns nothing
+/// about which handles exist — the grant is checked before the handle is resolved, so a refusal
+/// cannot be used to discover what windows the compositor holds.
+const fn shell_refusal(error: ShellError, object: ObjectId) -> StateError {
+    match error {
+        ShellError::NotGranted => StateError::UnsupportedCapability {
+            object_id: object,
+            capability: Capability::ShellControl,
+        },
+        ShellError::UnknownHandle { .. } => StateError::InvalidState { object_id: object },
     }
 }

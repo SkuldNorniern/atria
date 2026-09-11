@@ -11,7 +11,7 @@
 use atria_protocol::interface::{Interface, MessageKind, Operation, decode_operation};
 use atria_protocol::message::{
     Attach, Bind, Commit, CreateBuffer, CreatePool, DamageBuffer, GetRegistry, GetToplevel,
-    GlobalName, NewId, SetTitle, SizeHint,
+    GlobalName, NewId, SetTitle, ShellConfigure, ShellHandle, ShellPlace, SizeHint,
 };
 use atria_protocol::wire::{Frame, HandleIndex};
 use atria_protocol::{DecodeError, ObjectId, Opcode};
@@ -20,6 +20,7 @@ use atria_protocol::message::MAX_TITLE_BYTES;
 
 use crate::model::{ClientRequest, ObjectKind, Point, Rect, Size, TitleText};
 use crate::resolve::{HandleResolver, ResolveError, SharedMemory};
+use crate::shell::ToplevelHandle;
 
 /// Which interface an object of this kind answers, when the draw path defines one.
 ///
@@ -40,6 +41,7 @@ pub const fn interface_of(kind: ObjectKind) -> Option<Interface> {
         ObjectKind::Toplevel => Some(Interface::Toplevel),
         ObjectKind::ShmPool => Some(Interface::ShmPool),
         ObjectKind::Output => Some(Interface::Output),
+        ObjectKind::ShellControl => Some(Interface::ShellControl),
         ObjectKind::Seat | ObjectKind::Session | ObjectKind::Fence | ObjectKind::InputStream => {
             None
         }
@@ -110,6 +112,30 @@ pub enum DecodedRequest<'a> {
     SetTitle {
         toplevel: ObjectId,
         title: &'a str,
+    },
+    /// A shell's request, carrying a compositor-wide handle rather than an object it could name.
+    ShellConfigure {
+        control: ObjectId,
+        handle: ToplevelHandle,
+        size: Size,
+        state: u32,
+    },
+    ShellPlace {
+        control: ObjectId,
+        handle: ToplevelHandle,
+        position: Point,
+    },
+    ShellRaise {
+        control: ObjectId,
+        handle: ToplevelHandle,
+    },
+    ShellFocus {
+        control: ObjectId,
+        handle: ToplevelHandle,
+    },
+    ShellClose {
+        control: ObjectId,
+        handle: ToplevelHandle,
     },
     SetMinSize {
         toplevel: ObjectId,
@@ -203,6 +229,50 @@ pub fn decode<'a>(kind: ObjectKind, frame: &Frame<'a>) -> Result<DecodedRequest<
             Ok(DecodedRequest::SetTitle {
                 toplevel: object,
                 title: payload.title,
+            })
+        }
+        Operation::ShellControlConfigure => {
+            let payload = ShellConfigure::decode(frame.payload)?;
+            Ok(DecodedRequest::ShellConfigure {
+                control: object,
+                handle: ToplevelHandle(payload.handle),
+                size: Size {
+                    width: payload.width,
+                    height: payload.height,
+                },
+                state: payload.state,
+            })
+        }
+        Operation::ShellControlPlace => {
+            let payload = ShellPlace::decode(frame.payload)?;
+            Ok(DecodedRequest::ShellPlace {
+                control: object,
+                handle: ToplevelHandle(payload.handle),
+                position: Point {
+                    x: payload.x,
+                    y: payload.y,
+                },
+            })
+        }
+        Operation::ShellControlRaise => {
+            let payload = ShellHandle::decode(frame.payload)?;
+            Ok(DecodedRequest::ShellRaise {
+                control: object,
+                handle: ToplevelHandle(payload.handle),
+            })
+        }
+        Operation::ShellControlFocus => {
+            let payload = ShellHandle::decode(frame.payload)?;
+            Ok(DecodedRequest::ShellFocus {
+                control: object,
+                handle: ToplevelHandle(payload.handle),
+            })
+        }
+        Operation::ShellControlClose => {
+            let payload = ShellHandle::decode(frame.payload)?;
+            Ok(DecodedRequest::ShellClose {
+                control: object,
+                handle: ToplevelHandle(payload.handle),
             })
         }
         Operation::ToplevelSetMinSize => {
@@ -326,6 +396,35 @@ pub fn resolve(
                 maximum: MAX_TITLE_BYTES,
             })?;
             Ok(ClientRequest::SetTitle { toplevel, title })
+        }
+        DecodedRequest::ShellConfigure {
+            control,
+            handle,
+            size,
+            state,
+        } => Ok(ClientRequest::ShellConfigure {
+            control,
+            handle,
+            size,
+            state,
+        }),
+        DecodedRequest::ShellPlace {
+            control,
+            handle,
+            position,
+        } => Ok(ClientRequest::ShellPlace {
+            control,
+            handle,
+            position,
+        }),
+        DecodedRequest::ShellRaise { control, handle } => {
+            Ok(ClientRequest::ShellRaise { control, handle })
+        }
+        DecodedRequest::ShellFocus { control, handle } => {
+            Ok(ClientRequest::ShellFocus { control, handle })
+        }
+        DecodedRequest::ShellClose { control, handle } => {
+            Ok(ClientRequest::ShellClose { control, handle })
         }
         DecodedRequest::SetMinSize { toplevel, size } => {
             Ok(ClientRequest::SetMinSize { toplevel, size })
