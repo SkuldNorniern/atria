@@ -3,6 +3,7 @@
 use std::error::Error;
 use std::fmt;
 use std::io::{self, ErrorKind, Read, Write};
+use std::mem::take;
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread;
@@ -63,11 +64,33 @@ impl Error for VncError {
 /// frame that has been superseded has no value: showing it would be showing something that is no
 /// longer true. The serial is what lets a viewer tell "nothing new yet" from "the same pixels
 /// again".
+/// What a viewer did with its pointer.
+///
+/// The viewer is a real input source, not only a window onto the output. Coordinates are the
+/// output's, because that is what a remote framebuffer protocol speaks in; turning them into a
+/// surface's own coordinates is the compositor's job and not this package's.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PointerInput {
+    pub x: i32,
+    pub y: i32,
+    /// One bit per button, as RFB carries them. Bit zero is the primary button.
+    pub buttons: u8,
+}
+
 #[derive(Default)]
 struct Latest {
     frame: Mutex<(u64, Vec<u8>)>,
     composed: Condvar,
+    /// What the viewer has done since anyone last looked.
+    ///
+    /// Bounded: a viewer that moves its pointer faster than the compositor reads loses the
+    /// intermediate positions, which is the right thing to lose. A queue that grew without limit
+    /// would let a viewer make the compositor's memory its own.
+    input: Mutex<Vec<PointerInput>>,
 }
+
+/// How many pointer reports are kept between reads.
+const MAX_PENDING_INPUT: usize = 256;
 
 /// A sink that shows the composed output to one connected viewer.
 ///
@@ -119,6 +142,17 @@ impl VncSink {
     pub const fn frames_composed(&self) -> u64 {
         self.frames_composed
     }
+
+    /// Take what the viewer has done since this was last called.
+    #[must_use]
+    pub fn take_input(&self) -> Vec<PointerInput> {
+        let mut held = self
+            .latest
+            .input
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        take(&mut *held)
+    }
 }
 
 impl Viewer {
@@ -135,51 +169,70 @@ impl Viewer {
             // A viewer that connects after the last composition still sees it. The output has a
             // current state whether or not anything changed while somebody was watching.
             let mut shown = 0;
+            let mut asked = false;
             loop {
-                // A viewer that goes away while nothing is being composed must still be noticed,
-                // or the next viewer waits behind a connection nobody is on the other end of.
-                // The wait is bounded so departure is found by reading, not by failing to write.
-                let Some(frame) = self.wait_for_frame(shown) else {
-                    if Self::drain_requests(&mut stream).is_err() {
-                        break;
-                    }
-                    continue;
-                };
-                shown = frame.0;
-                let written = Self::drain_requests(&mut stream).and_then(|()| {
-                    write_full_update(&mut stream, self.size.0, self.size.1, &frame.1)
-                });
-                if written.is_err() {
+                // Read first, always. This is where a viewer's input arrives and where its
+                // departure is noticed, and a server that only read before writing would stop
+                // hearing from a viewer that had stopped asking for frames.
+                if self.drain_requests(&mut stream, &mut asked).is_err() {
                     break;
                 }
+                // Sent only when asked for. RFB puts the client in charge of when a frame
+                // arrives, and pushing one at a client that is not reading fills the socket and
+                // blocks this thread — which is how a viewer stops being able to send input at
+                // all.
+                if asked && let Some(frame) = self.frame_after(shown) {
+                    shown = frame.0;
+                    asked = false;
+                    if write_full_update(&mut stream, self.size.0, self.size.1, &frame.1).is_err() {
+                        break;
+                    }
+                }
+                self.wait_briefly(shown);
             }
         }
     }
 }
 
-/// How long the viewer waits for a new frame before checking its connection is still there.
-const DEPARTURE_CHECK: Duration = Duration::from_millis(200);
+/// How long the viewer sleeps before looking at its connection again.
+///
+/// Short, because this is also how often a viewer's pointer is read. A frame being composed wakes
+/// it sooner, so the interval only bounds how long an idle compositor takes to notice input.
+const VIEWER_TICK: Duration = Duration::from_millis(8);
 
 impl Viewer {
-    /// Wait for a frame newer than `shown`, or return nothing so the caller can check the peer.
-    fn wait_for_frame(&self, shown: u64) -> Option<(u64, Vec<u8>)> {
-        let mut held = self
+    /// The composed frame, if one newer than `shown` exists. Never waits.
+    fn frame_after(&self, shown: u64) -> Option<(u64, Vec<u8>)> {
+        let held = self
             .latest
             .frame
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        while held.0 == shown || held.1.is_empty() {
-            let (next, timeout) = self
-                .latest
-                .composed
-                .wait_timeout(held, DEPARTURE_CHECK)
-                .unwrap_or_else(PoisonError::into_inner);
-            if timeout.timed_out() {
-                return None;
-            }
-            held = next;
+        if held.0 == shown || held.1.is_empty() {
+            return None;
         }
         Some((held.0, held.1.clone()))
+    }
+
+    /// Sleep until something is composed, or briefly, whichever comes first.
+    ///
+    /// Bounded so that a viewer's input and its departure are still noticed while nothing is
+    /// being composed. Waiting on the condvar rather than sleeping means a frame wakes this
+    /// immediately instead of after the interval.
+    fn wait_briefly(&self, shown: u64) {
+        let held = self
+            .latest
+            .frame
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if held.0 != shown {
+            return;
+        }
+        let _unused = self
+            .latest
+            .composed
+            .wait_timeout(held, VIEWER_TICK)
+            .unwrap_or_else(PoisonError::into_inner);
     }
 
     /// RFB 3.8: version, security, then the server's description of the framebuffer.
@@ -223,14 +276,31 @@ impl Viewer {
     /// Every message is read whole even when it changes nothing. Skipping one by its number
     /// without consuming its body leaves the next read starting mid-message, and everything after
     /// that is misread — a failure that looks like a corrupt frame rather than a parsing bug.
-    fn drain_requests(stream: &mut TcpStream) -> io::Result<()> {
+    fn drain_requests(&self, stream: &mut TcpStream, asked: &mut bool) -> io::Result<()> {
         stream.set_nonblocking(true)?;
-        let outcome = Self::drain(stream);
+        let outcome = self.drain(stream, asked);
         stream.set_nonblocking(false)?;
         outcome
     }
 
-    fn drain(stream: &mut TcpStream) -> io::Result<()> {
+    /// Record what a `PointerEvent` said, dropping the oldest when the bound is reached.
+    fn record_pointer(&self, body: &[u8]) {
+        // Button mask, then x and y, big-endian, as RFB 3.8 defines the message.
+        let buttons = body[0];
+        let x = i32::from(u16::from_be_bytes([body[1], body[2]]));
+        let y = i32::from(u16::from_be_bytes([body[3], body[4]]));
+        let mut held = self
+            .latest
+            .input
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if held.len() >= MAX_PENDING_INPUT {
+            held.remove(0);
+        }
+        held.push(PointerInput { x, y, buttons });
+    }
+
+    fn drain(&self, stream: &mut TcpStream, asked: &mut bool) -> io::Result<()> {
         loop {
             let mut number = [0_u8; 1];
             match stream.read(&mut number) {
@@ -243,16 +313,23 @@ impl Viewer {
             // The rest of a message must be read with the socket blocking: it has already begun
             // arriving, and treating a partial message as "nothing to read" would lose it.
             stream.set_nonblocking(false)?;
-            let result = Self::consume_body(stream, number[0]);
+            if number[0] == client_message::FRAMEBUFFER_UPDATE_REQUEST {
+                *asked = true;
+            }
+            let result = self.consume_body(stream, number[0]);
             stream.set_nonblocking(true)?;
             result?;
         }
     }
 
-    fn consume_body(stream: &mut TcpStream, number: u8) -> io::Result<()> {
+    fn consume_body(&self, stream: &mut TcpStream, number: u8) -> io::Result<()> {
         if let Some(length) = client_message_length(number) {
             let mut body = vec![0_u8; length];
-            return stream.read_exact(&mut body);
+            stream.read_exact(&mut body)?;
+            if number == client_message::POINTER_EVENT {
+                self.record_pointer(&body);
+            }
+            return Ok(());
         }
         match number {
             client_message::SET_ENCODINGS => {

@@ -10,4 +10,4 @@
 mod protocol;
 mod server;
 
-pub use server::{VncError, VncSink};
+pub use server::{PointerInput, VncError, VncSink};
