@@ -205,3 +205,22 @@ fn the_table_holds_eleven_interfaces() {
     }
     assert_eq!(Interface::Surface.name(), "atria_surface");
 }
+
+/// Two interfaces may define the same opcode, and that is the point.
+///
+/// Opcodes are local to their interface, so the object a message names is the only thing that
+/// says which interface to read it as. This pins the case that actually bit: the display's error
+/// and the registry's global announcement are both opcode zero, so a compositor that addressed
+/// announcements to the display would make them indistinguishable from errors.
+#[test]
+fn an_opcode_alone_does_not_identify_a_message() {
+    assert_eq!(
+        Operation::DisplayError.spec().opcode,
+        Operation::RegistryGlobal.spec().opcode,
+        "these two collide, which is why the object must disambiguate them"
+    );
+    assert_ne!(
+        Operation::DisplayError.spec().interface,
+        Operation::RegistryGlobal.spec().interface,
+    );
+}
