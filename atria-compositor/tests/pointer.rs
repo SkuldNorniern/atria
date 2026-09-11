@@ -39,7 +39,7 @@ fn window(state: &mut CompositorState, side: u32, at: Point) -> (ConnectionId, S
         .unwrap_or_else(|error| panic!("its session: {error:?}"));
     state
         .dispatch(connection, ClientRequest::CreateRegistry { new_id: id(2) })
-        .expect("a registry");
+        .unwrap_or_else(|error| panic!("a registry: {error:?}"));
     let seat = state
         .take_events()
         .into_iter()
@@ -51,7 +51,7 @@ fn window(state: &mut CompositorState, side: u32, at: Point) -> (ConnectionId, S
             } => Some(name),
             _ => None,
         })
-        .expect("the seat is advertised");
+        .unwrap_or_else(|| panic!("the seat is advertised"));
     state
         .dispatch(
             connection,
@@ -61,7 +61,7 @@ fn window(state: &mut CompositorState, side: u32, at: Point) -> (ConnectionId, S
                 new_id: id(3),
             },
         )
-        .expect("the client binds the seat");
+        .unwrap_or_else(|error| panic!("the client binds the seat: {error:?}"));
     state
         .dispatch(
             connection,
@@ -74,7 +74,7 @@ fn window(state: &mut CompositorState, side: u32, at: Point) -> (ConnectionId, S
 
     state
         .dispatch(connection, ClientRequest::CreateSurface { new_id: id(256) })
-        .expect("a surface");
+        .unwrap_or_else(|error| panic!("a surface: {error:?}"));
     state
         .dispatch(
             connection,
@@ -91,7 +91,7 @@ fn window(state: &mut CompositorState, side: u32, at: Point) -> (ConnectionId, S
                 },
             },
         )
-        .expect("a buffer");
+        .unwrap_or_else(|error| panic!("a buffer: {error:?}"));
     state
         .dispatch(
             connection,
@@ -102,16 +102,18 @@ fn window(state: &mut CompositorState, side: u32, at: Point) -> (ConnectionId, S
                 acquire_fence: None,
             },
         )
-        .expect("an attach");
+        .unwrap_or_else(|error| panic!("an attach: {error:?}"));
     state
         .dispatch(connection, ClientRequest::Commit { surface: id(256) })
-        .expect("a commit");
+        .unwrap_or_else(|error| panic!("a commit: {error:?}"));
 
     let key = SurfaceKey {
         connection,
         object_id: id(256),
     };
-    state.place_surface(key, at).expect("a placement");
+    state
+        .place_surface(key, at)
+        .unwrap_or_else(|error| panic!("a placement: {error:?}"));
     (connection, key)
 }
 
@@ -223,10 +225,10 @@ fn a_press_tells_the_shell_which_window_without_telling_it_the_input() {
     let mut state = server();
     state
         .advertise_global(ObjectKind::ShellControl, 1)
-        .expect("the authority is advertised");
+        .unwrap_or_else(|| panic!("the authority is advertised"));
     state
         .advertise_global(ObjectKind::Shell, 1)
-        .expect("the role factory is advertised");
+        .unwrap_or_else(|| panic!("the role factory is advertised"));
 
     let (client, surface) = window(&mut state, 100, Point { x: 0, y: 0 });
     state
@@ -237,23 +239,23 @@ fn a_press_tells_the_shell_which_window_without_telling_it_the_input() {
                 new_id: id(257),
             },
         )
-        .expect("a window role");
+        .unwrap_or_else(|error| panic!("a window role: {error:?}"));
     let handle = state
         .toplevel_handle(client, id(257))
-        .expect("the window has a handle");
+        .unwrap_or_else(|| panic!("the window has a handle"));
 
     let shell = state
         .connect(
             CapabilitySet::default_grants().with(Capability::ShellControl),
             CapabilitySet::empty(),
         )
-        .expect("a shell connects");
+        .unwrap_or_else(|error| panic!("a shell connects: {error:?}"));
     state
         .grant_capability(shell, Capability::ShellControl)
-        .expect("the grant");
+        .unwrap_or_else(|error| panic!("the grant: {error:?}"));
     state
         .dispatch(shell, ClientRequest::CreateRegistry { new_id: id(2) })
-        .expect("a registry");
+        .unwrap_or_else(|error| panic!("a registry: {error:?}"));
     let control = state
         .take_events()
         .into_iter()
@@ -265,7 +267,7 @@ fn a_press_tells_the_shell_which_window_without_telling_it_the_input() {
             } => Some(name),
             _ => None,
         })
-        .expect("the authority is offered");
+        .unwrap_or_else(|| panic!("the authority is offered"));
     state
         .dispatch(
             shell,
@@ -275,7 +277,7 @@ fn a_press_tells_the_shell_which_window_without_telling_it_the_input() {
                 new_id: id(3),
             },
         )
-        .expect("the shell binds it");
+        .unwrap_or_else(|error| panic!("the shell binds it: {error:?}"));
 
     state.move_pointer(Point { x: 50, y: 50 }, 1_000);
     let _ = state.take_events();
