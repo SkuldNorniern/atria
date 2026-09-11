@@ -353,7 +353,7 @@ pub fn encode_event(event: &Event, sequence: u32, out: &mut [u8]) -> Result<usiz
             emit(object, Operation::TextInputCommit, sequence, &payload, out)
         }
         EventKind::TextDone { serial } => {
-            let payload = GlobalName { name: *serial };
+            let payload = message::Number { value: *serial };
             emit(object, Operation::TextInputDone, sequence, &payload, out)
         }
         EventKind::MethodActivated {

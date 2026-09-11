@@ -11,9 +11,8 @@
 use atria_protocol::interface::{Interface, MessageKind, Operation, decode_operation};
 use atria_protocol::message::{
     Attach, Bind, Commit, CommitText, CompositionRound, CreateBuffer, CreatePool, CursorArea,
-    DamageBuffer, GetRegistry, GetToplevel, GlobalName, NewId, Preedit, SeatHandle, SetTitle,
-    ShellConfigure, ShellHandle, ShellPlace, ShortcutName, ShortcutRegistration, SizeHint,
-    TextPurpose,
+    DamageBuffer, GetRegistry, GetToplevel, NewId, Number, Preedit, SeatHandle, SetTitle,
+    ShellConfigure, ShellHandle, ShellPlace, ShortcutRegistration, SizeHint, TextPurpose,
 };
 use atria_protocol::wire::{Frame, HandleIndex};
 use atria_protocol::{DecodeError, ObjectId, Opcode};
@@ -322,8 +321,8 @@ pub fn decode<'a>(kind: ObjectKind, frame: &Frame<'a>) -> Result<DecodedRequest<
             })
         }
         Operation::TextInputEnable => {
-            let payload = GlobalName::decode(frame.payload)?;
-            let purpose = TextPurpose::from_raw(payload.name).ok_or(DecodeError::SizeOverflow)?;
+            let payload = Number::decode(frame.payload)?;
+            let purpose = TextPurpose::from_raw(payload.value).ok_or(DecodeError::SizeOverflow)?;
             Ok(DecodedRequest::EnableText {
                 text_input: object,
                 purpose,
@@ -369,10 +368,10 @@ pub fn decode<'a>(kind: ObjectKind, frame: &Frame<'a>) -> Result<DecodedRequest<
             })
         }
         Operation::ShortcutsUnregister => {
-            let payload = ShortcutName::decode(frame.payload)?;
+            let payload = Number::decode(frame.payload)?;
             Ok(DecodedRequest::UnregisterShortcut {
                 manager: object,
-                shortcut: payload.shortcut,
+                shortcut: payload.value,
             })
         }
         Operation::ShellControlConfigure => {
@@ -478,10 +477,10 @@ pub fn decode<'a>(kind: ObjectKind, frame: &Frame<'a>) -> Result<DecodedRequest<
             })
         }
         Operation::SurfaceFrame => {
-            let payload = GlobalName::decode(frame.payload)?;
+            let payload = Number::decode(frame.payload)?;
             Ok(DecodedRequest::RequestFrame {
                 surface: object,
-                serial: payload.name,
+                serial: payload.value,
             })
         }
         Operation::SurfaceCommit => {
