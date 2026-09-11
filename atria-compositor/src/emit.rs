@@ -169,11 +169,90 @@ pub fn encode_event(event: &Event, sequence: u32, out: &mut [u8]) -> Result<usiz
                 out,
             )
         }
-        EventKind::ShellFocusChanged { handle } => {
-            let payload = message::ShellHandle { handle: handle.0 };
+        EventKind::ShellFocusChanged { seat, handle } => {
+            let payload = message::SeatHandle {
+                seat: seat.0,
+                handle: handle.0,
+            };
             emit(
                 object,
                 Operation::ShellControlFocusChanged,
+                sequence,
+                &payload,
+                out,
+            )
+        }
+        EventKind::PointerEnter {
+            serial,
+            surface,
+            position,
+            epoch,
+        } => {
+            let payload = message::PointerEnter {
+                serial: *serial,
+                surface: *surface,
+                x: position.x,
+                y: position.y,
+                epoch: *epoch,
+            };
+            emit(object, Operation::PointerEnter, sequence, &payload, out)
+        }
+        EventKind::PointerLeave {
+            serial,
+            surface,
+            epoch,
+        } => {
+            let payload = message::PointerLeave {
+                serial: *serial,
+                surface: *surface,
+                epoch: *epoch,
+            };
+            emit(object, Operation::PointerLeave, sequence, &payload, out)
+        }
+        EventKind::PointerMotion {
+            time_ns,
+            position,
+            epoch,
+        } => {
+            let payload = message::PointerMotion {
+                time_ns: *time_ns,
+                x: position.x,
+                y: position.y,
+                epoch: *epoch,
+            };
+            emit(object, Operation::PointerMotion, sequence, &payload, out)
+        }
+        EventKind::PointerButton {
+            serial,
+            time_ns,
+            button,
+            pressed,
+            epoch,
+        } => {
+            let payload = message::PointerButton {
+                serial: *serial,
+                time_ns: *time_ns,
+                button: *button,
+                state: u32::from(*pressed),
+                epoch: *epoch,
+            };
+            emit(object, Operation::PointerButton, sequence, &payload, out)
+        }
+        EventKind::ShellInteraction {
+            seat,
+            handle,
+            serial,
+            kind,
+        } => {
+            let payload = message::ShellInteraction {
+                seat: seat.0,
+                handle: handle.0,
+                serial: *serial,
+                kind: kind.into_raw(),
+            };
+            emit(
+                object,
+                Operation::ShellControlInteraction,
                 sequence,
                 &payload,
                 out,

@@ -11,14 +11,14 @@
 use atria_protocol::interface::{Interface, MessageKind, Operation, decode_operation};
 use atria_protocol::message::{
     Attach, Bind, Commit, CreateBuffer, CreatePool, DamageBuffer, GetRegistry, GetToplevel,
-    GlobalName, NewId, SetTitle, ShellConfigure, ShellHandle, ShellPlace, SizeHint,
+    GlobalName, NewId, SeatHandle, SetTitle, ShellConfigure, ShellHandle, ShellPlace, SizeHint,
 };
 use atria_protocol::wire::{Frame, HandleIndex};
 use atria_protocol::{DecodeError, ObjectId, Opcode};
 
 use atria_protocol::message::MAX_TITLE_BYTES;
 
-use crate::model::{ClientRequest, ObjectKind, Point, Rect, Size, TitleText};
+use crate::model::{ClientRequest, ObjectKind, Point, Rect, SeatId, Size, TitleText};
 use crate::resolve::{HandleResolver, ResolveError, SharedMemory};
 use crate::shell::ToplevelHandle;
 
@@ -42,9 +42,9 @@ pub const fn interface_of(kind: ObjectKind) -> Option<Interface> {
         ObjectKind::ShmPool => Some(Interface::ShmPool),
         ObjectKind::Output => Some(Interface::Output),
         ObjectKind::ShellControl => Some(Interface::ShellControl),
-        ObjectKind::Seat | ObjectKind::Session | ObjectKind::Fence | ObjectKind::InputStream => {
-            None
-        }
+        ObjectKind::Pointer => Some(Interface::Pointer),
+        ObjectKind::Seat => Some(Interface::Seat),
+        ObjectKind::Session | ObjectKind::Fence | ObjectKind::InputStream => None,
     }
 }
 
@@ -113,6 +113,10 @@ pub enum DecodedRequest<'a> {
         toplevel: ObjectId,
         title: &'a str,
     },
+    GetPointer {
+        seat: ObjectId,
+        new_id: ObjectId,
+    },
     /// A shell's request, carrying a compositor-wide handle rather than an object it could name.
     ShellConfigure {
         control: ObjectId,
@@ -131,6 +135,7 @@ pub enum DecodedRequest<'a> {
     },
     ShellFocus {
         control: ObjectId,
+        seat: SeatId,
         handle: ToplevelHandle,
     },
     ShellClose {
@@ -231,6 +236,13 @@ pub fn decode<'a>(kind: ObjectKind, frame: &Frame<'a>) -> Result<DecodedRequest<
                 title: payload.title,
             })
         }
+        Operation::SeatGetPointer => {
+            let payload = NewId::decode(frame.payload)?;
+            Ok(DecodedRequest::GetPointer {
+                seat: object,
+                new_id: payload.new_id,
+            })
+        }
         Operation::ShellControlConfigure => {
             let payload = ShellConfigure::decode(frame.payload)?;
             Ok(DecodedRequest::ShellConfigure {
@@ -262,9 +274,10 @@ pub fn decode<'a>(kind: ObjectKind, frame: &Frame<'a>) -> Result<DecodedRequest<
             })
         }
         Operation::ShellControlFocus => {
-            let payload = ShellHandle::decode(frame.payload)?;
+            let payload = SeatHandle::decode(frame.payload)?;
             Ok(DecodedRequest::ShellFocus {
                 control: object,
+                seat: SeatId(payload.seat),
                 handle: ToplevelHandle(payload.handle),
             })
         }
@@ -397,6 +410,9 @@ pub fn resolve(
             })?;
             Ok(ClientRequest::SetTitle { toplevel, title })
         }
+        DecodedRequest::GetPointer { seat, new_id } => {
+            Ok(ClientRequest::GetPointer { seat, new_id })
+        }
         DecodedRequest::ShellConfigure {
             control,
             handle,
@@ -420,9 +436,15 @@ pub fn resolve(
         DecodedRequest::ShellRaise { control, handle } => {
             Ok(ClientRequest::ShellRaise { control, handle })
         }
-        DecodedRequest::ShellFocus { control, handle } => {
-            Ok(ClientRequest::ShellFocus { control, handle })
-        }
+        DecodedRequest::ShellFocus {
+            control,
+            seat,
+            handle,
+        } => Ok(ClientRequest::ShellFocus {
+            control,
+            seat,
+            handle,
+        }),
         DecodedRequest::ShellClose { control, handle } => {
             Ok(ClientRequest::ShellClose { control, handle })
         }

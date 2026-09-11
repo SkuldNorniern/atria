@@ -13,9 +13,9 @@ use atria_protocol::interface::toplevel_state;
 
 use crate::model::{
     BufferDescriptor, BufferState, BufferTransport, ClientRequest, CommitId, ConnectionId, Damage,
-    Event, EventKind, FocusEvent, ObjectKind, Point, Rect, SeatCapabilities, SeatSnapshot,
-    SessionSnapshot, Size, SurfaceKey, SurfaceRole, SurfaceSnapshot, TitleText,
-    pixel_format_is_known,
+    Event, EventKind, FocusEvent, InteractionKind, ObjectKind, Point, Rect, SeatCapabilities,
+    SeatId, SeatSnapshot, SessionSnapshot, Size, SurfaceKey, SurfaceRole, SurfaceSnapshot,
+    TitleText, pixel_format_is_known,
 };
 use atria_protocol::interface::Interface;
 
@@ -244,6 +244,28 @@ struct Scene {
     stack: Vec<SurfaceKey>,
 }
 
+/// Where the pointer is, what holds it, and which routing world that belongs to.
+#[derive(Clone, Copy, Debug, Default)]
+struct PointerRouting {
+    /// Where the pointer is, in the scene.
+    position: Point,
+    /// The surface events are going to.
+    ///
+    /// While a button is held this is the surface the press landed on, wherever the pointer
+    /// afterwards goes. A client dragging a scrollbar out of its own window must keep receiving
+    /// the drag, or the release never arrives and it is left holding a button forever.
+    target: Option<SurfaceKey>,
+    /// Which buttons are down. The grab lasts exactly as long as any of them.
+    buttons_held: u32,
+    /// Advances whenever routing continuity breaks.
+    ///
+    /// A press in one epoch and a release in the next are not a pair. Carrying the epoch on every
+    /// event lets a client reject the stale half instead of believing a button is still down.
+    epoch: u32,
+    /// Distinguishes one event from another for a client that must quote one back.
+    serial: u32,
+}
+
 /// A global the registry advertises: what it offers, and up to which version.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct Global {
@@ -267,6 +289,7 @@ pub struct CompositorState {
     globals: BTreeMap<u32, Global>,
     next_global: u32,
     outputs: OutputSet,
+    pointer: PointerRouting,
     next_configure: u32,
     /// Windows by the handle a shell names them with. Compositor-wide, so it outlives any one
     /// connection — including a shell's.
@@ -297,6 +320,7 @@ impl CompositorState {
             globals: BTreeMap::new(),
             next_global: 1,
             outputs: OutputSet::new(),
+            pointer: PointerRouting::default(),
             next_configure: 1,
             toplevels: BTreeMap::new(),
             next_handle: 1,
@@ -525,6 +549,10 @@ impl CompositorState {
         request: ClientRequest,
     ) -> Result<(), StateError> {
         match request {
+            ClientRequest::GetPointer { seat, new_id } => {
+                self.expect_kind(connection, seat, ObjectKind::Seat)?;
+                self.allocate_client(connection, new_id, ObjectKind::Pointer, Object::Global)
+            }
             ClientRequest::CreateRegistry { new_id } => {
                 self.allocate_client(connection, new_id, ObjectKind::Registry, Object::Registry)?;
                 // A registry that advertises nothing is a client that can reach nothing, so the
@@ -649,8 +677,12 @@ impl CompositorState {
             ClientRequest::ShellRaise { control, handle } => self
                 .shell_raise(connection, handle)
                 .map_err(|error| shell_refusal(error, control)),
-            ClientRequest::ShellFocus { control, handle } => self
-                .shell_focus(connection, handle)
+            ClientRequest::ShellFocus {
+                control,
+                seat,
+                handle,
+            } => self
+                .shell_focus(connection, seat, handle)
                 .map_err(|error| shell_refusal(error, control)),
             ClientRequest::ShellClose { control, handle } => self
                 .shell_close(connection, handle)
@@ -1188,7 +1220,10 @@ impl CompositorState {
         let handle = new_focus
             .and_then(|surface| self.handle_of_surface(surface))
             .unwrap_or(ToplevelHandle(0));
-        self.tell_shells(EventKind::ShellFocusChanged { handle });
+        self.tell_shells(EventKind::ShellFocusChanged {
+            seat: SeatId(1),
+            handle,
+        });
         Ok(events)
     }
 
@@ -1494,6 +1529,7 @@ impl CompositorState {
             connection,
             control,
             EventKind::ShellFocusChanged {
+                seat: SeatId(1),
                 handle: focused.unwrap_or(ToplevelHandle(0)),
             },
         );
@@ -1612,6 +1648,18 @@ impl CompositorState {
         if global.kind == ObjectKind::ShellControl {
             self.snapshot_for_shell(connection, new_id);
         }
+        if global.kind == ObjectKind::Seat {
+            // The bound object has to be a seat rather than a bare global, or asking it for a
+            // pointer would be asking something the compositor does not know is a seat.
+            if let Some(client) = self.connections.get_mut(&connection)
+                && let Ok(entry) = client.registry.entry_mut(new_id)
+            {
+                entry.value = Object::Seat(SeatState {
+                    capabilities: SeatCapabilities::empty(),
+                    active: true,
+                });
+            }
+        }
         Ok(())
     }
 
@@ -1722,6 +1770,200 @@ impl CompositorState {
         take(&mut self.events)
     }
 
+    /// Where the pointer is.
+    #[must_use]
+    pub const fn pointer_position(&self) -> Point {
+        self.pointer.position
+    }
+
+    /// Which routing world the pointer is currently in.
+    #[must_use]
+    pub const fn pointer_epoch(&self) -> u32 {
+        self.pointer.epoch
+    }
+
+    /// Break pointer routing continuity and start a new epoch.
+    ///
+    /// Called when what the pointer was pointing at stops being meaningful — a device leaving, a
+    /// grab cancelled, routing rebuilt. Anything still in flight from the old world carries the
+    /// old epoch and can be recognised as stale rather than acted on.
+    pub fn reset_pointer(&mut self) {
+        if let Some(target) = self.pointer.target.take() {
+            self.send_pointer_leave(target);
+        }
+        self.pointer.buttons_held = 0;
+        self.pointer.epoch = self.pointer.epoch.wrapping_add(1);
+    }
+
+    /// Move the pointer, routing enter, leave and motion to whatever it is over.
+    ///
+    /// While a button is held the target does not change: the surface the press landed on keeps
+    /// receiving motion even outside itself, and stops only when the last button comes up.
+    pub fn move_pointer(&mut self, position: Point, time_ns: u64) {
+        self.pointer.position = position;
+        if self.pointer.buttons_held != 0 {
+            if let Some(target) = self.pointer.target {
+                self.send_pointer_motion(target, position, time_ns);
+            }
+            return;
+        }
+
+        let found = self.surface_under(position);
+        if found != self.pointer.target {
+            if let Some(old) = self.pointer.target {
+                self.send_pointer_leave(old);
+            }
+            self.pointer.target = found;
+            if let Some(new) = found {
+                self.send_pointer_enter(new, position);
+            }
+        }
+        if let Some(target) = self.pointer.target {
+            self.send_pointer_motion(target, position, time_ns);
+        }
+    }
+
+    /// Press or release a pointer button.
+    ///
+    /// A press takes the implicit grab; the release of the last held button gives it back and
+    /// recomputes what the pointer is over. A press also tells any attached shell that a window
+    /// was interacted with — which is what click-to-focus is built from, without the shell ever
+    /// seeing what the client does with the click.
+    pub fn pointer_button(&mut self, button: u32, pressed: bool, time_ns: u64) {
+        if pressed && self.pointer.buttons_held == 0 {
+            self.pointer.target = self.surface_under(self.pointer.position);
+            if let Some(target) = self.pointer.target {
+                self.send_pointer_enter(target, self.pointer.position);
+            }
+        }
+
+        let Some(target) = self.pointer.target else {
+            return;
+        };
+        self.pointer.serial = self.pointer.serial.wrapping_add(1);
+        let serial = self.pointer.serial;
+        let epoch = self.pointer.epoch;
+        // Addressed to the pointer object, like every other pointer event. The surface is what
+        // the pointer is over, not what the seat speaks through.
+        self.send_to_pointers(target.connection, |_| EventKind::PointerButton {
+            serial,
+            time_ns,
+            button,
+            pressed,
+            epoch,
+        });
+
+        if pressed {
+            self.pointer.buttons_held = self.pointer.buttons_held.saturating_add(1);
+            if let Some(handle) = self.handle_of_surface(target) {
+                self.tell_shells(EventKind::ShellInteraction {
+                    seat: SeatId(1),
+                    handle,
+                    serial,
+                    kind: InteractionKind::PointerPress,
+                });
+            }
+        } else {
+            self.pointer.buttons_held = self.pointer.buttons_held.saturating_sub(1);
+            if self.pointer.buttons_held == 0 {
+                let under = self.surface_under(self.pointer.position);
+                if under != Some(target) {
+                    self.send_pointer_leave(target);
+                    self.pointer.target = under;
+                    if let Some(new) = under {
+                        self.send_pointer_enter(new, self.pointer.position);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The topmost surface containing a point.
+    fn surface_under(&self, point: Point) -> Option<SurfaceKey> {
+        self.scene.stack.iter().rev().copied().find(|surface| {
+            self.surface_area(*surface)
+                .is_some_and(|area| area.contains(point))
+        })
+    }
+
+    /// Where a surface is on screen, and how big.
+    fn surface_area(&self, surface: SurfaceKey) -> Option<Rect> {
+        let position = self.scene.positions.get(&surface)?;
+        let state = self.surface(surface.connection, surface.object_id).ok()?;
+        let current = state.current.as_ref()?;
+        let buffer = self
+            .buffer(surface.connection, current.snapshot.buffer)
+            .ok()?;
+        Some(Rect {
+            x: position.x.checked_add(current.snapshot.offset.x)?,
+            y: position.y.checked_add(current.snapshot.offset.y)?,
+            width: buffer.descriptor.size.width,
+            height: buffer.descriptor.size.height,
+        })
+    }
+
+    /// A point in a surface's own coordinates.
+    fn surface_local(&self, surface: SurfaceKey, point: Point) -> Point {
+        self.surface_area(surface).map_or(point, |area| Point {
+            x: point.x.saturating_sub(area.x),
+            y: point.y.saturating_sub(area.y),
+        })
+    }
+
+    /// Send to every pointer object the surface's connection holds.
+    ///
+    /// A connection may hold more than one; each is a view of the same seat, so each is told.
+    fn send_to_pointers(&mut self, connection: ConnectionId, make: impl Fn(ObjectId) -> EventKind) {
+        let pointers: Vec<_> = self
+            .connections
+            .get(&connection)
+            .map(|client| {
+                client
+                    .registry
+                    .ids()
+                    .filter(|id| client.registry.kind_of(*id) == Some(ObjectKind::Pointer))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for pointer in pointers {
+            let event = make(pointer);
+            self.push_event(connection, pointer, event);
+        }
+    }
+
+    fn send_pointer_enter(&mut self, target: SurfaceKey, position: Point) {
+        self.pointer.serial = self.pointer.serial.wrapping_add(1);
+        let serial = self.pointer.serial;
+        let epoch = self.pointer.epoch;
+        let local = self.surface_local(target, position);
+        self.send_to_pointers(target.connection, |_| EventKind::PointerEnter {
+            serial,
+            surface: target.object_id,
+            position: local,
+            epoch,
+        });
+    }
+
+    fn send_pointer_leave(&mut self, target: SurfaceKey) {
+        self.pointer.serial = self.pointer.serial.wrapping_add(1);
+        let serial = self.pointer.serial;
+        let epoch = self.pointer.epoch;
+        self.send_to_pointers(target.connection, |_| EventKind::PointerLeave {
+            serial,
+            surface: target.object_id,
+            epoch,
+        });
+    }
+
+    fn send_pointer_motion(&mut self, target: SurfaceKey, position: Point, time_ns: u64) {
+        let epoch = self.pointer.epoch;
+        let local = self.surface_local(target, position);
+        self.send_to_pointers(target.connection, |_| EventKind::PointerMotion {
+            time_ns,
+            position: local,
+            epoch,
+        });
+    }
     /// Every way the scene can disagree with the objects behind it.
     ///
     /// The scene names surfaces by connection and object. Both can go away, and every path that
@@ -2262,8 +2504,10 @@ impl CompositorState {
     pub fn shell_focus(
         &mut self,
         shell: ConnectionId,
+        seat: SeatId,
         handle: ToplevelHandle,
     ) -> Result<(), ShellError> {
+        let _ = seat;
         let (connection, object_id) = self.shell_target(shell, handle)?;
         let surface = self
             .toplevel_surface(connection, object_id)

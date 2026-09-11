@@ -60,11 +60,12 @@ fn an_object_kind_answers_at_most_one_interface() {
     assert_eq!(interface_of(ObjectKind::Surface), Some(Interface::Surface));
     assert_eq!(interface_of(ObjectKind::Buffer), Some(Interface::Buffer));
 
-    // Input and explicit synchronization are outside the draw path, so these kinds exist in the
-    // compositor and cannot be addressed from the wire at all. Mapping them to some interface and
-    // refusing every opcode would report the wrong thing.
+    // A seat and its pointer are on the wire now. Sessions, fences and the raw input stream are
+    // not: they exist in the compositor and cannot be addressed from the wire at all. Mapping
+    // them to some interface and refusing every opcode would report the wrong thing.
+    assert_eq!(interface_of(ObjectKind::Seat), Some(Interface::Seat));
+    assert_eq!(interface_of(ObjectKind::Pointer), Some(Interface::Pointer));
     for kind in [
-        ObjectKind::Seat,
         ObjectKind::Session,
         ObjectKind::Fence,
         ObjectKind::InputStream,
@@ -84,9 +85,9 @@ fn a_frame_to_an_unassigned_kind_names_the_kind() {
     let frame = Frame::decode(&packet).expect("frame must decode");
 
     assert_eq!(
-        decode(ObjectKind::Seat, &frame),
+        decode(ObjectKind::Session, &frame),
         Err(BindError::InterfaceUnassigned {
-            kind: ObjectKind::Seat
+            kind: ObjectKind::Session
         })
     );
 }

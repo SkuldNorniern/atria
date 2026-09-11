@@ -12,6 +12,31 @@ use crate::output::IdentitySource;
 use crate::resolve::SharedMemory;
 use crate::shell::ToplevelHandle;
 
+/// An input and routing domain.
+///
+/// Not "the mouse and keyboard": one machine can have two people at it, and a television has a
+/// remote and a gamepad. Everything about focus and routing is a seat's, so a model with one
+/// global focus would have to be replaced rather than extended.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct SeatId(pub u64);
+
+/// What a person did to a window.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InteractionKind {
+    /// A pointer button went down over it. This is what click-to-focus is built from.
+    PointerPress,
+}
+
+impl InteractionKind {
+    /// The wire's number for this kind.
+    #[must_use]
+    pub const fn into_raw(self) -> u32 {
+        match self {
+            Self::PointerPress => 0,
+        }
+    }
+}
+
 use crate::error::StateError;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -47,6 +72,8 @@ pub enum ObjectKind {
     InputStream,
     /// The authority to arrange every window, bound from the registry by a shell.
     ShellControl,
+    /// One seat's pointing device, as a client sees it.
+    Pointer,
     /// A display, bound from the registry. One global per display, because a client learns which
     /// displays exist the same way it learns everything else exists.
     Output,
@@ -297,11 +324,17 @@ pub enum ClientRequest {
     },
     ShellFocus {
         control: ObjectId,
+        seat: SeatId,
         handle: ToplevelHandle,
     },
     ShellClose {
         control: ObjectId,
         handle: ToplevelHandle,
+    },
+    /// Ask a seat for its pointing device.
+    GetPointer {
+        seat: ObjectId,
+        new_id: ObjectId,
     },
     /// Give a surface window semantics. A surface may take one role.
     GetToplevel {
@@ -397,6 +430,41 @@ pub enum EventKind {
     FrameLate,
     KeyboardLeave,
     KeyboardEnter,
+    /// The pointer came over this surface, at a point inside it.
+    PointerEnter {
+        serial: u32,
+        surface: ObjectId,
+        position: Point,
+        epoch: u32,
+    },
+    /// The pointer is no longer over this surface.
+    PointerLeave {
+        serial: u32,
+        surface: ObjectId,
+        epoch: u32,
+    },
+    PointerMotion {
+        time_ns: u64,
+        position: Point,
+        epoch: u32,
+    },
+    PointerButton {
+        serial: u32,
+        time_ns: u64,
+        button: u32,
+        pressed: bool,
+        epoch: u32,
+    },
+    /// A person did something to a window, as a shell is told about it.
+    ///
+    /// Deliberately not the input itself. A shell needs to know a window was pressed so it can
+    /// raise and focus it; it has no business seeing what is typed into it afterwards.
+    ShellInteraction {
+        seat: SeatId,
+        handle: ToplevelHandle,
+        serial: u32,
+        kind: InteractionKind,
+    },
     /// Which display a bound output object names.
     OutputIdentity {
         identity: u128,
@@ -430,8 +498,9 @@ pub enum EventKind {
     ShellToplevelGone {
         handle: ToplevelHandle,
     },
-    /// Keyboard focus moved. A null handle means nothing holds it.
+    /// Keyboard focus moved on a seat. A null handle means nothing on that seat holds it.
     ShellFocusChanged {
+        seat: SeatId,
         handle: ToplevelHandle,
     },
     /// Everything the shell was told before this is the state as it stood when it attached.

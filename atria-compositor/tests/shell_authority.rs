@@ -2,8 +2,8 @@
 
 use atria_compositor::{
     BufferDescriptor, BufferTransport, ClientRequest, CompositorState, ConnectionId,
-    ConnectionLimits, EventKind, ObjectKind, Point, ServerLimits, ShellError, Size, TitleText,
-    ToplevelHandle,
+    ConnectionLimits, EventKind, ObjectKind, Point, SeatId, ServerLimits, ShellError, Size,
+    TitleText, ToplevelHandle,
 };
 use atria_protocol::ObjectId;
 use atria_protocol::capability::{Capability, CapabilitySet};
@@ -198,7 +198,7 @@ fn arranging_windows_requires_the_grant_to_arrange_windows() {
         Err(ShellError::NotGranted)
     );
     assert_eq!(
-        state.shell_focus(impostor, handle),
+        state.shell_focus(impostor, SeatId(1), handle),
         Err(ShellError::NotGranted)
     );
     assert_eq!(
@@ -402,6 +402,7 @@ fn a_shell_binding_is_told_every_window_and_where_the_telling_ends() {
                 title: String::from("map"),
             },
             EventKind::ShellFocusChanged {
+                seat: SeatId(1),
                 handle: ToplevelHandle(0),
             },
             EventKind::ShellSnapshotDone,
@@ -603,7 +604,7 @@ fn a_shell_is_told_about_windows_that_arrive_after_it_attached() {
         .expect("the window");
     let _ = state.take_events();
     state
-        .shell_focus(shell, window)
+        .shell_focus(shell, SeatId(1), window)
         .unwrap_or_else(|error| panic!("the shell focuses it: {error:?}"));
     let focused: Vec<_> = state
         .take_events()
@@ -613,7 +614,7 @@ fn a_shell_is_told_about_windows_that_arrive_after_it_attached() {
         .collect();
     assert!(
         focused.iter().any(
-            |kind| matches!(kind, EventKind::ShellFocusChanged { handle } if *handle == window)
+            |kind| matches!(kind, EventKind::ShellFocusChanged { handle, .. } if *handle == window)
         ),
         "and the shell is told which window now holds focus"
     );

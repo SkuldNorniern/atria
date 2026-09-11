@@ -24,9 +24,9 @@ pub use emit::{EmitError, encode_event};
 pub use error::{ErrorCode, SceneFault, StateError};
 pub use model::{
     BufferDescriptor, BufferState, BufferTransport, ClientRequest, CommitId, ConnectionId, Damage,
-    Event, EventKind, FORMAT_ARGB8888, FORMAT_RGB565, FORMAT_XRGB8888, FocusEvent, ObjectKind,
-    Point, Rect, SeatCapabilities, SeatSnapshot, SessionSnapshot, Size, SurfaceKey, SurfaceRole,
-    SurfaceSnapshot, TitleText, pixel_format_is_known,
+    Event, EventKind, FORMAT_ARGB8888, FORMAT_RGB565, FORMAT_XRGB8888, FocusEvent, InteractionKind,
+    ObjectKind, Point, Rect, SeatCapabilities, SeatId, SeatSnapshot, SessionSnapshot, Size,
+    SurfaceKey, SurfaceRole, SurfaceSnapshot, TitleText, pixel_format_is_known,
 };
 pub use output::{
     IdentitySource, MAX_SCALE_TERM, OutputIdentity, OutputInfo, OutputSet, TopologyDelta,
