@@ -45,6 +45,12 @@ const VERSION: u32 = 1;
 const OUTPUT_WIDTH: u32 = 1280;
 const OUTPUT_HEIGHT: u32 = 720;
 const OUTPUT_REFRESH_MILLIHERTZ: u32 = 60_000;
+
+/// How long the server waits before checking a viewer for input.
+const INPUT_INTERVAL_MS: i32 = 16;
+
+/// The button a viewer's primary click reports as.
+const PRIMARY_BUTTON: u32 = 1;
 const OUTPUT_MILLIMETRES: Size = Size {
     width: 340,
     height: 190,
@@ -107,6 +113,7 @@ fn run() -> io::Result<()> {
         ObjectKind::Shm,
         ObjectKind::Shell,
         ObjectKind::ShellControl,
+        ObjectKind::Seat,
     ] {
         if state.advertise_global(kind, VERSION).is_none() {
             return Err(io::Error::other("a global could not be advertised"));
@@ -151,6 +158,11 @@ fn run() -> io::Result<()> {
 
     let mut sessions: Vec<Session<UnixTransport>> = Vec::new();
     let mut composed = 0_u64;
+    // A monotonic count, not a clock. Input events need an ordering, and nothing here has
+    // measured a real one — calling this nanoseconds would be a timing claim with nothing
+    // behind it.
+    let mut clock = 0_u64;
+    let mut pressed = false;
 
     loop {
         // One wait covers the listener and every client. Serving clients in turn instead would
@@ -180,9 +192,17 @@ fn run() -> io::Result<()> {
             });
         }
 
+        // A viewer's input arrives on a thread of its own, so the wait is bounded while anyone
+        // could be pointing at something. With no viewer there is nothing to check for and the
+        // wait is indefinite, because waking to find nothing is work done for no reason.
+        let timeout = if viewer.is_some() {
+            INPUT_INTERVAL_MS
+        } else {
+            -1
+        };
         // SAFETY: `poll` reads and writes exactly the descriptors in the slice, which is owned
         // here and outlives the call.
-        let ready = unsafe { poll(watched.as_mut_ptr(), watched.len() as nfds_t, -1) };
+        let ready = unsafe { poll(watched.as_mut_ptr(), watched.len() as nfds_t, timeout) };
         if ready < 0 {
             let error = io::Error::last_os_error();
             if error.kind() == io::ErrorKind::Interrupted {
@@ -217,6 +237,27 @@ fn run() -> io::Result<()> {
         }
 
         let mut dispatched = false;
+        if let Some(sink) = viewer.as_ref() {
+            for report in sink.take_input() {
+                let moved = Point {
+                    x: report.x,
+                    y: report.y,
+                };
+                clock = clock.saturating_add(1);
+                state.move_pointer(moved, clock);
+                // One bit per button. Only a change is an event: a report is the whole state of
+                // the pointer, and resending a press that is already down would be a second
+                // press.
+                let primary = report.buttons & 1 != 0;
+                if primary != pressed {
+                    pressed = primary;
+                    clock = clock.saturating_add(1);
+                    state.pointer_button(PRIMARY_BUTTON, primary, clock);
+                }
+                dispatched = true;
+            }
+        }
+
         let mut departed = Vec::new();
         for (index, session) in sessions.iter_mut().enumerate().take(polled) {
             if watched[index + 2].revents & (POLLIN | POLLHUP | POLLERR) == 0 {
