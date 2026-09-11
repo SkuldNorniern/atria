@@ -10,13 +10,19 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use atria_vnc::PixelFormat;
-use atria_vnc::protocol::{changed_regions, write_update};
+use atria_vnc::protocol::{Region, changed_regions, write_update};
 
 const WIDTH: u16 = 1280;
 const HEIGHT: u16 = 720;
 const ROUNDS: u32 = 50;
 
 fn main() {
+    let whole = [Region {
+        x: 0,
+        y: 0,
+        width: WIDTH,
+        height: HEIGHT,
+    }];
     let size = usize::from(WIDTH) * usize::from(HEIGHT) * 4;
     let previous = vec![0_u8; size];
     let mut current = previous.clone();
@@ -31,9 +37,15 @@ fn main() {
 
     let started = Instant::now();
     for _ in 0..ROUNDS {
-        black_box(changed_regions(Some(&previous), &current, WIDTH, HEIGHT));
+        black_box(changed_regions(
+            Some(&previous),
+            &current,
+            WIDTH,
+            HEIGHT,
+            &whole,
+        ));
     }
-    let regions = changed_regions(Some(&previous), &current, WIDTH, HEIGHT);
+    let regions = changed_regions(Some(&previous), &current, WIDTH, HEIGHT, &whole);
     println!(
         "compare:  {:?} per frame, {} rectangles",
         started.elapsed() / ROUNDS,

@@ -2,10 +2,22 @@ use std::fs::{File, OpenOptions};
 use std::io::{Error, Seek, SeekFrom, Write};
 use std::path::Path;
 
+use atria_compositor::Rect;
+
 use crate::{Frame, FrameReport, SinkError};
 
+/// A composed frame and what it changed.
+///
+/// `damage` covers every pixel differing from the frame before it, and may cover more. A sink
+/// that redraws only those rectangles shows the same thing as one that redraws everything.
+pub struct Presented<'a> {
+    pub frame: &'a Frame,
+    pub damage: &'a [Rect],
+    pub report: FrameReport,
+}
+
 pub trait FrameSink {
-    fn present(&mut self, frame: &Frame, report: FrameReport) -> Result<(), SinkError>;
+    fn present(&mut self, presented: Presented<'_>) -> Result<(), SinkError>;
 }
 
 #[derive(Debug, Default)]
@@ -35,9 +47,9 @@ impl HeadlessSink {
 }
 
 impl FrameSink for HeadlessSink {
-    fn present(&mut self, _frame: &Frame, report: FrameReport) -> Result<(), SinkError> {
+    fn present(&mut self, presented: Presented<'_>) -> Result<(), SinkError> {
         self.frames_presented = self.frames_presented.saturating_add(1);
-        self.last_report = Some(report);
+        self.last_report = Some(presented.report);
         Ok(())
     }
 }
@@ -60,12 +72,12 @@ impl FileSink {
 }
 
 impl FrameSink for FileSink {
-    fn present(&mut self, frame: &Frame, _report: FrameReport) -> Result<(), SinkError> {
+    fn present(&mut self, presented: Presented<'_>) -> Result<(), SinkError> {
+        let bytes = presented.frame.bytes();
         self.file.seek(SeekFrom::Start(0))?;
-        self.file.write_all(frame.bytes())?;
-        self.file.set_len(
-            u64::try_from(frame.bytes().len()).map_err(|_| Error::other("frame too large"))?,
-        )?;
+        self.file.write_all(bytes)?;
+        self.file
+            .set_len(u64::try_from(bytes.len()).map_err(|_| Error::other("frame too large"))?)?;
         self.file.flush()?;
         Ok(())
     }

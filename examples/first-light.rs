@@ -13,7 +13,7 @@ use atria_compositor::{
 };
 use atria_protocol::ObjectId;
 use atria_software_output::{
-    BufferKey, BufferStore, Frame, FrameReport, FrameSink, PixelLayout, PresentError, SinkError,
+    BufferKey, BufferStore, FrameSink, PixelLayout, PresentError, Presented, SinkError,
     SoftwareBuffer, SoftwareOutput, ValidationError, capabilities,
 };
 use core::fmt::{self, Display, Formatter};
@@ -61,7 +61,8 @@ impl PpmSink {
 }
 
 impl FrameSink for PpmSink {
-    fn present(&mut self, frame: &Frame, _report: FrameReport) -> Result<(), SinkError> {
+    fn present(&mut self, presented: Presented<'_>) -> Result<(), SinkError> {
+        let frame = presented.frame;
         let size = frame.size();
         self.file
             .write_all(format!("P6\n{} {}\n255\n", size.width, size.height).as_bytes())?;

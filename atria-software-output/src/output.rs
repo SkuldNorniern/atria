@@ -9,7 +9,8 @@ use atria_compositor::{
 };
 
 use crate::{
-    BufferKey, BufferStore, ComposeError, Frame, FrameSink, PixelLayout, SinkError, ValidationError,
+    BufferKey, BufferStore, ComposeError, Frame, FrameSink, PixelLayout, Presented, SinkError,
+    ValidationError,
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -353,8 +354,12 @@ impl SoftwareOutput {
         let report = self
             .compose(state, buffers, timestamp_ns)
             .map_err(PresentError::Compose)?;
-        sink.present(&self.frame, report)
-            .map_err(PresentError::Sink)?;
+        sink.present(Presented {
+            frame: &self.frame,
+            damage: &self.damage,
+            report,
+        })
+        .map_err(PresentError::Sink)?;
         Ok(report)
     }
 }

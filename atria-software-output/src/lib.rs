@@ -14,11 +14,12 @@ mod frame;
 mod output;
 mod sink;
 
+pub use atria_compositor::Rect;
 pub use buffer::{BufferKey, BufferStore, SoftwareBuffer};
 pub use error::{ComposeError, SinkError, ValidationError};
 pub use frame::{Frame, PixelLayout};
 pub use output::{FrameReport, PresentError, SoftwareOutput};
-pub use sink::{FileSink, FrameSink, HeadlessSink};
+pub use sink::{FileSink, FrameSink, HeadlessSink, Presented};
 
 use atria_protocol::capability::{Capability, CapabilitySet};
 

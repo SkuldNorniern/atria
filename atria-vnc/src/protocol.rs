@@ -215,6 +215,16 @@ pub struct Region {
     pub height: u16,
 }
 
+/// Whether any of `bounds` reaches into the square from `left`,`top` to `right`,`bottom`.
+fn overlaps(bounds: &[Region], left: usize, top: usize, right: usize, bottom: usize) -> bool {
+    bounds.iter().any(|bound| {
+        usize::from(bound.x) < right
+            && usize::from(bound.y) < bottom
+            && left < usize::from(bound.x) + usize::from(bound.width)
+            && top < usize::from(bound.y) + usize::from(bound.height)
+    })
+}
+
 /// The side of the squares the frame is compared in.
 ///
 /// Comparing whole rows would send a whole row for one changed pixel; comparing single pixels
@@ -232,6 +242,11 @@ const WHOLESALE_TILES: usize = 2;
 /// 1280x720 is three and a half megabytes; a window moving touches a tenth of that, and on
 /// anything slower than loopback the rest is the whole of the latency.
 ///
+/// `bounds` is where the compositor says a change is possible. Nothing outside it is compared,
+/// which is what keeps the cost proportional to what moved rather than to the size of the screen;
+/// comparing inside it is what keeps the answer tight enough to be worth sending. An empty
+/// `bounds` means nothing changed at all.
+///
 /// Returns one rectangle covering the frame when there is no previous frame to compare against,
 /// or when so much changed that the comparison has stopped paying for itself.
 #[must_use]
@@ -240,6 +255,7 @@ pub fn changed_regions(
     current: &[u8],
     width: u16,
     height: u16,
+    bounds: &[Region],
 ) -> Vec<Region> {
     let whole = vec![Region {
         x: 0,
@@ -252,6 +268,9 @@ pub fn changed_regions(
     };
     if previous.len() != current.len() {
         return whole;
+    }
+    if bounds.is_empty() {
+        return Vec::new();
     }
 
     let pixels = usize::from(width);
@@ -270,11 +289,12 @@ pub fn changed_regions(
         for tile_x in 0..across {
             let left = tile_x * TILE;
             let right = (left + TILE).min(pixels);
-            let differs = (top..bottom).any(|row| {
-                let start = (row * pixels + left) * 4;
-                let end = (row * pixels + right) * 4;
-                previous[start..end] != current[start..end]
-            });
+            let differs = overlaps(bounds, left, top, right, bottom)
+                && (top..bottom).any(|row| {
+                    let start = (row * pixels + left) * 4;
+                    let end = (row * pixels + right) * 4;
+                    previous[start..end] != current[start..end]
+                });
             match (differs, run) {
                 (true, None) => run = Some((left, right)),
                 (true, Some((start, _))) => run = Some((start, right)),

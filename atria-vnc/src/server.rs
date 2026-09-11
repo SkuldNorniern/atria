@@ -12,12 +12,13 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread;
 use std::time::Duration;
 
-use atria_software_output::{Frame, FrameReport, FrameSink, SinkError};
+use atria_software_output::Rect;
+use atria_software_output::{FrameSink, Presented, SinkError};
 
 use crate::input::{Input, InputQueue};
 use crate::protocol::{
-    PixelFormat, SECURITY_NONE, VERSION, changed_regions, client_message, client_message_length,
-    encoding, pixel_format, read_exact, usage_of_keysym, write_update,
+    PixelFormat, Region, SECURITY_NONE, VERSION, changed_regions, client_message,
+    client_message_length, encoding, pixel_format, read_exact, usage_of_keysym, write_update,
 };
 
 /// Why the framebuffer could not be served.
@@ -74,10 +75,30 @@ impl Error for VncError {
 /// frame that has been superseded has no value: showing it would be showing something that is no
 /// longer true. The serial is what lets a viewer tell "nothing new yet" from "the same pixels
 /// again".
+/// What has changed since a viewer last took it.
+///
+/// Accumulated across frames, because a viewer that skips one still has to be told what that
+/// frame changed. `Whole` is the answer when the list would be longer than redrawing everything,
+/// and when nobody has been told anything yet.
+#[derive(Default)]
+enum Pending {
+    #[default]
+    Whole,
+    Regions(Vec<Region>),
+}
+
+/// The composed frame, and what it changed since a viewer last looked.
+#[derive(Default)]
+struct Held {
+    id: u64,
+    bytes: Arc<Vec<u8>>,
+    pending: Pending,
+}
+
 #[derive(Default)]
 struct Latest {
     /// Shared, not copied: a viewer holds these bytes while the next frame is composed.
-    frame: Mutex<(u64, Arc<Vec<u8>>)>,
+    frame: Mutex<Held>,
     composed: Condvar,
     input: Mutex<InputQueue>,
     /// Keysyms this server could not place, so each is reported once rather than every press.
@@ -211,11 +232,11 @@ impl Viewer {
             // a resize or an expose, and a diff leaves it showing nothing until something moves.
             let mut asked_whole = false;
             let mut format = PixelFormat::declared();
-            // What this viewer was last sent. Per viewer: a rectangle list is only correct
-            // against the frame it was computed from.
-            let mut sent: Option<Arc<Vec<u8>>> = None;
             // Raw until the viewer asks for something else.
             let mut hextile = false;
+            // What this viewer was last sent, to compare the damaged part of the next frame
+            // against. A rectangle list is only correct against the frame it came from.
+            let mut sent: Option<Arc<Vec<u8>>> = None;
             loop {
                 // A newer viewer replaces this one. Nothing is shared between them, so the new
                 // one starts from a whole frame.
@@ -225,6 +246,7 @@ impl Viewer {
                     asked = false;
                     asked_whole = false;
                     format = PixelFormat::declared();
+                    self.forget_pending();
                     sent = None;
                     hextile = false;
                 }
@@ -240,14 +262,19 @@ impl Viewer {
                     break;
                 }
                 // Only when asked: pushing at a client that is not reading blocks this thread.
-                if asked && let Some(frame) = self.frame_after(shown) {
-                    shown = frame.0;
+                if asked && let Some((id, bytes, pending)) = self.frame_after(shown) {
+                    shown = id;
                     let previous = if asked_whole {
                         None
                     } else {
                         sent.as_deref().map(Vec::as_slice)
                     };
-                    let regions = changed_regions(previous, &frame.1, self.size.0, self.size.1);
+                    let bounds = match pending {
+                        Pending::Whole => vec![self.whole()],
+                        Pending::Regions(regions) => regions,
+                    };
+                    let regions =
+                        changed_regions(previous, &bytes, self.size.0, self.size.1, &bounds);
                     // Nothing changed. The request stays outstanding rather than being answered
                     // empty, so the next frame that does change something reaches it unasked.
                     if !regions.is_empty() {
@@ -256,7 +283,7 @@ impl Viewer {
                         if let Err(error) = write_update(
                             &mut stream,
                             &regions,
-                            &frame.1,
+                            &bytes,
                             self.size.0,
                             format,
                             hextile,
@@ -265,7 +292,7 @@ impl Viewer {
                             break;
                         }
                     }
-                    sent = Some(frame.1);
+                    sent = Some(bytes);
                 }
                 // Waits unless there is something to send, or a quiet viewer burns a core.
                 self.wait_briefly(if asked { shown } else { u64::MAX });
@@ -283,6 +310,9 @@ const MAX_REPORTED_KEYSYMS: usize = 64;
 /// How long the viewer sleeps before reading its connection again. This bounds how long a pointer
 /// report waits before the compositor is told, so it is short.
 const VIEWER_TICK: Duration = Duration::from_millis(2);
+
+/// How many rectangles are worth naming before redrawing everything is cheaper.
+const MAX_PENDING_REGIONS: usize = 64;
 
 /// A viewer holds at most the frame it last drew, so two is enough and the pool cannot grow.
 const SPARE_FRAMES: usize = 2;
@@ -307,16 +337,37 @@ impl Viewer {
     }
 
     /// The composed frame, if one newer than `shown` exists. Never waits.
-    fn frame_after(&self, shown: u64) -> Option<(u64, Arc<Vec<u8>>)> {
-        let held = self
+    /// Take the newest frame and everything that has changed since this was last called.
+    fn frame_after(&self, shown: u64) -> Option<(u64, Arc<Vec<u8>>, Pending)> {
+        let mut held = self
             .latest
             .frame
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if held.0 == shown || held.1.is_empty() {
+        if held.id == shown || held.bytes.is_empty() {
             return None;
         }
-        Some((held.0, Arc::clone(&held.1)))
+        let pending = replace(&mut held.pending, Pending::Regions(Vec::new()));
+        Some((held.id, Arc::clone(&held.bytes), pending))
+    }
+
+    /// Say that this viewer knows nothing, so the next frame it asks for arrives whole.
+    fn forget_pending(&self) {
+        let mut held = self
+            .latest
+            .frame
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        held.pending = Pending::Whole;
+    }
+
+    const fn whole(&self) -> Region {
+        Region {
+            x: 0,
+            y: 0,
+            width: self.size.0,
+            height: self.size.1,
+        }
     }
 
     /// Sleep until something is composed, or briefly, whichever comes first.
@@ -328,7 +379,7 @@ impl Viewer {
             .frame
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if held.0 != shown && shown != u64::MAX {
+        if held.id != shown && shown != u64::MAX {
             return;
         }
         let _unused = self
@@ -557,26 +608,63 @@ fn report(error: &io::Error) {
     eprintln!("atria-vnc: the viewer was dropped: {error}");
 }
 
+/// Add a frame's damage to what a viewer has still to be told about.
+///
+/// Whole stays whole, and a list that outgrows [`MAX_PENDING_REGIONS`] becomes whole: past that
+/// point naming the rectangles costs more than redrawing everything. A rectangle that will not
+/// fit the wire's coordinates also collapses to whole, because naming less than changed would
+/// leave the viewer showing pixels that are gone.
+fn accumulate(pending: Pending, damage: &[Rect]) -> Pending {
+    let Pending::Regions(mut regions) = pending else {
+        return Pending::Whole;
+    };
+    if regions.len().saturating_add(damage.len()) > MAX_PENDING_REGIONS {
+        return Pending::Whole;
+    }
+    for rect in damage {
+        let Ok(x) = u16::try_from(rect.x) else {
+            return Pending::Whole;
+        };
+        let Ok(y) = u16::try_from(rect.y) else {
+            return Pending::Whole;
+        };
+        let Ok(width) = u16::try_from(rect.width) else {
+            return Pending::Whole;
+        };
+        let Ok(height) = u16::try_from(rect.height) else {
+            return Pending::Whole;
+        };
+        regions.push(Region {
+            x,
+            y,
+            width,
+            height,
+        });
+    }
+    Pending::Regions(regions)
+}
+
 /// Name an unrecognised client message, so a log says which one arrived.
 fn alloc_message(number: u8) -> String {
     format!("the viewer sent message type {number}, which this server does not speak")
 }
 
 impl FrameSink for VncSink {
-    fn present(&mut self, frame: &Frame, _report: FrameReport) -> Result<(), SinkError> {
+    fn present(&mut self, presented: Presented<'_>) -> Result<(), SinkError> {
         self.frames_composed += 1;
         // Copied: the frame belongs to the next composition once this returns.
         let mut bytes = self.spare.pop().unwrap_or_default();
         bytes.clear();
-        bytes.extend_from_slice(frame.bytes());
+        bytes.extend_from_slice(presented.frame.bytes());
 
         let mut held = self
             .latest
             .frame
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        held.0 = self.frames_composed;
-        let replaced = replace(&mut held.1, Arc::new(bytes));
+        held.id = self.frames_composed;
+        held.pending = accumulate(replace(&mut held.pending, Pending::Whole), presented.damage);
+        let replaced = replace(&mut held.bytes, Arc::new(bytes));
         drop(held);
         self.latest.composed.notify_all();
 

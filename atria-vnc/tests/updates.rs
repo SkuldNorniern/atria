@@ -8,6 +8,16 @@
 use atria_vnc::PixelFormat;
 use atria_vnc::protocol::{Region, changed_regions, write_update};
 
+/// Everything, for tests that are not about bounding the comparison.
+fn whole() -> Region {
+    Region {
+        x: 0,
+        y: 0,
+        width: WIDTH,
+        height: HEIGHT,
+    }
+}
+
 const WIDTH: u16 = 256;
 const HEIGHT: u16 = 128;
 
@@ -28,7 +38,7 @@ fn paint(frame: &mut [u8], x: usize, y: usize, width: usize, height: usize, colo
 #[test]
 fn a_first_frame_is_sent_whole_because_there_is_nothing_to_compare_it_to() {
     let frame = blank();
-    let regions = changed_regions(None, &frame, WIDTH, HEIGHT);
+    let regions = changed_regions(None, &frame, WIDTH, HEIGHT, &[whole()]);
     assert_eq!(
         regions,
         vec![Region {
@@ -45,7 +55,7 @@ fn a_first_frame_is_sent_whole_because_there_is_nothing_to_compare_it_to() {
 fn an_unchanged_frame_is_not_sent_at_all() {
     let frame = blank();
     assert!(
-        changed_regions(Some(&frame), &frame, WIDTH, HEIGHT).is_empty(),
+        changed_regions(Some(&frame), &frame, WIDTH, HEIGHT, &[whole()]).is_empty(),
         "a frame that changed nothing is a frame with nothing to say"
     );
 }
@@ -56,7 +66,7 @@ fn only_the_part_that_changed_is_described() {
     let mut current = previous.clone();
     paint(&mut current, 64, 32, 32, 32, [0x2f, 0x9e, 0xd8, 0xff]);
 
-    let regions = changed_regions(Some(&previous), &current, WIDTH, HEIGHT);
+    let regions = changed_regions(Some(&previous), &current, WIDTH, HEIGHT, &[whole()]);
     let covered: usize = regions
         .iter()
         .map(|region| usize::from(region.width) * usize::from(region.height))
@@ -86,7 +96,7 @@ fn a_change_over_most_of_the_frame_is_sent_as_one_rectangle() {
         [0x11, 0x22, 0x33, 0xff],
     );
 
-    let regions = changed_regions(Some(&previous), &current, WIDTH, HEIGHT);
+    let regions = changed_regions(Some(&previous), &current, WIDTH, HEIGHT, &[whole()]);
     assert_eq!(
         regions.len(),
         1,

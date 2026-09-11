@@ -1,7 +1,7 @@
 use std::io::{Error as IoError, ErrorKind};
 
 use atria_protocol::capability::CapabilitySet;
-use atria_software_output::{Frame, FrameReport, FrameSink, PixelLayout, SinkError};
+use atria_software_output::{Frame, FrameReport, FrameSink, PixelLayout, Presented, SinkError};
 
 use crate::backend::{IoctlBackend, ScanoutBackend};
 use crate::{DeviceConfig, DrmError, Mode};
@@ -51,8 +51,8 @@ impl DrmSink {
 }
 
 impl FrameSink for DrmSink {
-    fn present(&mut self, frame: &Frame, report: FrameReport) -> Result<(), SinkError> {
-        DrmSink::present(self, frame, report).map_err(drm_sink_error)
+    fn present(&mut self, presented: Presented<'_>) -> Result<(), SinkError> {
+        DrmSink::present(self, presented.frame, presented.report).map_err(drm_sink_error)
     }
 }
 
