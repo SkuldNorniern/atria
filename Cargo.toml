@@ -7,6 +7,7 @@ members = [
     "atria-protocol",
     "atria-software-output",
     "atria-transport",
+    "atriad",
 ]
 resolver = "3"
 
