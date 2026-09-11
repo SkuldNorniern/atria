@@ -24,6 +24,8 @@ pub struct SurfaceKey {
 pub enum ObjectKind {
     Display,
     Registry,
+    /// The surface factory a client binds from the registry.
+    Compositor,
     /// The shared-memory factory a client binds from the registry.
     Shm,
     ShmPool,

@@ -31,6 +31,7 @@ pub const fn interface_of(kind: ObjectKind) -> Option<Interface> {
         ObjectKind::Registry => Some(Interface::Registry),
         ObjectKind::Surface => Some(Interface::Surface),
         ObjectKind::Buffer => Some(Interface::Buffer),
+        ObjectKind::Compositor => Some(Interface::Compositor),
         ObjectKind::Shm => Some(Interface::Shm),
         ObjectKind::ShmPool => Some(Interface::ShmPool),
         ObjectKind::Seat | ObjectKind::Session | ObjectKind::Fence | ObjectKind::InputStream => {

@@ -100,6 +100,9 @@ impl Error for NegotiationError {}
 enum Object {
     Display,
     Registry,
+    /// A global the client bound. The compositor's resource behind it is not this object, so
+    /// destroying it releases the reference and nothing else.
+    Global,
     ShmPool(SharedMemory),
     Seat(SeatState),
     Session(SessionState),
@@ -1026,6 +1029,25 @@ impl CompositorState {
             .current
             .as_ref()
             .map(|value| &value.snapshot)
+    }
+
+    /// Offer a global to a connection at an identifier it may then address.
+    ///
+    /// Server-side until `registry.bind` is modelled: a client cannot reach a factory it has no
+    /// object for, and the globals a compositor offers are its own decision rather than a
+    /// request. When bind lands this becomes what bind does.
+    pub fn install_global(
+        &mut self,
+        connection: ConnectionId,
+        id: ObjectId,
+        kind: ObjectKind,
+    ) -> Result<(), StateError> {
+        match kind {
+            ObjectKind::Compositor | ObjectKind::Shm => {
+                self.allocate_client(connection, id, kind, Object::Global)
+            }
+            _ => Err(StateError::InvalidState { object_id: id }),
+        }
     }
 
     /// The memory a pool covers, as resolution validated it.
