@@ -461,13 +461,25 @@ pub fn write_update(
     format: PixelFormat,
     hextile: bool,
 ) -> io::Result<()> {
-    let mut message = Vec::with_capacity(4 + regions.len() * 12);
+    let stride = usize::from(width) * 4;
+    let rows = frame.len().checked_div(stride).unwrap_or(0);
+    // A rectangle reaching past the frame is dropped, not read. The regions this server computes
+    // always fit; a caller's need not, and reading past a frame is not a fault worth leaving for
+    // somebody to find later.
+    let fitting: Vec<&Region> = regions
+        .iter()
+        .filter(|region| {
+            (usize::from(region.x) + usize::from(region.width)) * 4 <= stride
+                && usize::from(region.y) + usize::from(region.height) <= rows
+        })
+        .collect();
+
+    let mut message = Vec::with_capacity(4 + fitting.len() * 12);
     message.push(0); // FramebufferUpdate
     message.push(0); // padding
-    message.extend_from_slice(&(regions.len() as u16).to_be_bytes());
+    message.extend_from_slice(&(fitting.len() as u16).to_be_bytes());
 
-    let stride = usize::from(width) * 4;
-    for region in regions {
+    for region in fitting {
         message.extend_from_slice(&region.x.to_be_bytes());
         message.extend_from_slice(&region.y.to_be_bytes());
         message.extend_from_slice(&region.width.to_be_bytes());

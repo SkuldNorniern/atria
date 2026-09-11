@@ -230,3 +230,74 @@ fn a_square_of_two_colours_costs_its_edges_rather_than_its_pixels() {
         raw.len()
     );
 }
+
+#[test]
+fn a_rectangle_reaching_past_the_frame_is_dropped_rather_than_read() {
+    let frame = blank();
+    let past = [
+        Region {
+            x: 0,
+            y: 0,
+            width: WIDTH,
+            height: HEIGHT + 1,
+        },
+        Region {
+            x: WIDTH - 4,
+            y: 0,
+            width: 64,
+            height: 4,
+        },
+    ];
+
+    for hextile in [false, true] {
+        let mut sink = Vec::new();
+        write_update(
+            &mut sink,
+            &past,
+            &frame,
+            WIDTH,
+            PixelFormat::declared(),
+            hextile,
+        )
+        .unwrap_or_else(|error| panic!("an update must encode: {error}"));
+        assert_eq!(
+            u16::from_be_bytes([sink[2], sink[3]]),
+            0,
+            "neither rectangle fits, so neither is sent"
+        );
+    }
+}
+
+#[test]
+fn the_rectangles_that_do_fit_are_still_sent() {
+    let frame = blank();
+    let mixed = [
+        Region {
+            x: 0,
+            y: 0,
+            width: 16,
+            height: 16,
+        },
+        Region {
+            x: 0,
+            y: 0,
+            width: WIDTH,
+            height: HEIGHT * 2,
+        },
+    ];
+    let mut sink = Vec::new();
+    write_update(
+        &mut sink,
+        &mixed,
+        &frame,
+        WIDTH,
+        PixelFormat::declared(),
+        false,
+    )
+    .unwrap_or_else(|error| panic!("an update must encode: {error}"));
+    assert_eq!(
+        u16::from_be_bytes([sink[2], sink[3]]),
+        1,
+        "one of the two fits, and the count must say one"
+    );
+}
