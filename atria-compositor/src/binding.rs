@@ -43,6 +43,7 @@ pub const fn interface_of(kind: ObjectKind) -> Option<Interface> {
         ObjectKind::Output => Some(Interface::Output),
         ObjectKind::ShellControl => Some(Interface::ShellControl),
         ObjectKind::Pointer => Some(Interface::Pointer),
+        ObjectKind::Keyboard => Some(Interface::Keyboard),
         ObjectKind::Seat => Some(Interface::Seat),
         ObjectKind::Session | ObjectKind::Fence | ObjectKind::InputStream => None,
     }
@@ -114,6 +115,10 @@ pub enum DecodedRequest<'a> {
         title: &'a str,
     },
     GetPointer {
+        seat: ObjectId,
+        new_id: ObjectId,
+    },
+    GetKeyboard {
         seat: ObjectId,
         new_id: ObjectId,
     },
@@ -244,6 +249,13 @@ pub fn decode<'a>(kind: ObjectKind, frame: &Frame<'a>) -> Result<DecodedRequest<
         Operation::SeatGetPointer => {
             let payload = NewId::decode(frame.payload)?;
             Ok(DecodedRequest::GetPointer {
+                seat: object,
+                new_id: payload.new_id,
+            })
+        }
+        Operation::SeatGetKeyboard => {
+            let payload = NewId::decode(frame.payload)?;
+            Ok(DecodedRequest::GetKeyboard {
                 seat: object,
                 new_id: payload.new_id,
             })
@@ -425,6 +437,9 @@ pub fn resolve(
         }
         DecodedRequest::GetPointer { seat, new_id } => {
             Ok(ClientRequest::GetPointer { seat, new_id })
+        }
+        DecodedRequest::GetKeyboard { seat, new_id } => {
+            Ok(ClientRequest::GetKeyboard { seat, new_id })
         }
         DecodedRequest::ShellConfigure {
             control,

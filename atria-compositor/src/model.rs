@@ -5,6 +5,7 @@ use atria_protocol::ObjectId;
 use atria_protocol::capability::Capability;
 
 use atria_protocol::interface::Interface;
+use atria_protocol::key::{Modifiers, PhysicalKey};
 use atria_protocol::message::MAX_TITLE_BYTES;
 use atria_protocol::opcode::Opcode;
 
@@ -74,6 +75,8 @@ pub enum ObjectKind {
     ShellControl,
     /// One seat's pointing device, as a client sees it.
     Pointer,
+    /// One seat's keyboard, as the client holding focus sees it.
+    Keyboard,
     /// A display, bound from the registry. One global per display, because a client learns which
     /// displays exist the same way it learns everything else exists.
     Output,
@@ -346,6 +349,11 @@ pub enum ClientRequest {
         seat: ObjectId,
         new_id: ObjectId,
     },
+    /// Ask a seat for its keyboard.
+    GetKeyboard {
+        seat: ObjectId,
+        new_id: ObjectId,
+    },
     /// Give a surface window semantics. A surface may take one role.
     GetToplevel {
         surface: ObjectId,
@@ -440,6 +448,32 @@ pub enum EventKind {
     FrameLate,
     KeyboardLeave,
     KeyboardEnter,
+    /// This surface now has the seat's keys, and these modifiers are already held.
+    KeyFocusGained {
+        serial: u32,
+        surface: ObjectId,
+        modifiers: Modifiers,
+        epoch: u32,
+    },
+    /// This surface no longer has the seat's keys.
+    KeyFocusLost {
+        serial: u32,
+        surface: ObjectId,
+        epoch: u32,
+    },
+    /// A key changed state, named by its physical position.
+    Key {
+        serial: u32,
+        time_ns: u64,
+        key: PhysicalKey,
+        pressed: bool,
+        epoch: u32,
+    },
+    /// Which modifiers are held.
+    KeyModifiers {
+        modifiers: Modifiers,
+        epoch: u32,
+    },
     /// The pointer came over this surface, at a point inside it.
     PointerEnter {
         serial: u32,

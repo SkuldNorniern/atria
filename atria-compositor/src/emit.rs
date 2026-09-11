@@ -261,6 +261,64 @@ pub fn encode_event(event: &Event, sequence: u32, out: &mut [u8]) -> Result<usiz
                 out,
             )
         }
+        EventKind::KeyFocusGained {
+            serial,
+            surface,
+            modifiers,
+            epoch,
+        } => {
+            let payload = message::KeyboardEnter {
+                serial: *serial,
+                surface: *surface,
+                modifiers: modifiers.0,
+                epoch: *epoch,
+            };
+            emit(object, Operation::KeyboardEnter, sequence, &payload, out)
+        }
+        EventKind::KeyFocusLost {
+            serial,
+            surface,
+            epoch,
+        } => {
+            let payload = message::KeyboardLeave {
+                serial: *serial,
+                surface: *surface,
+                epoch: *epoch,
+            };
+            emit(object, Operation::KeyboardLeave, sequence, &payload, out)
+        }
+        EventKind::Key {
+            serial,
+            time_ns,
+            key,
+            pressed,
+            epoch,
+        } => {
+            let payload = message::KeyboardKey {
+                serial: *serial,
+                time_ns: *time_ns,
+                key: key.usage(),
+                state: u32::from(*pressed),
+                epoch: *epoch,
+            };
+            emit(object, Operation::KeyboardKey, sequence, &payload, out)
+        }
+        EventKind::KeyModifiers { modifiers, epoch } => {
+            let payload = message::KeyboardModifiers {
+                depressed: modifiers.0,
+                latched: 0,
+                locked: 0,
+                group: 0,
+                epoch: *epoch,
+            };
+            emit(
+                object,
+                Operation::KeyboardModifiers,
+                sequence,
+                &payload,
+                out,
+            )
+        }
         EventKind::ShellGrabMotion { seat, position } => {
             let payload = message::SeatPoint {
                 seat: seat.0,

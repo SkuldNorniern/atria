@@ -1,4 +1,4 @@
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 use core::error::Error;
 use core::fmt;
@@ -18,6 +18,7 @@ use crate::model::{
     TitleText, pixel_format_is_known,
 };
 use atria_protocol::interface::Interface;
+use atria_protocol::key::{Modifiers, PhysicalKey};
 
 use crate::binding::interface_of;
 use alloc::string::String;
@@ -245,7 +246,10 @@ struct Scene {
 }
 
 /// Where the pointer is, what holds it, and which routing world that belongs to.
-#[derive(Clone, Copy, Debug, Default)]
+/// Keys a keyboard can hold at once. Bounds what a misreporting device can make us remember.
+const MAX_HELD_KEYS: usize = 32;
+
+#[derive(Clone, Debug, Default)]
 struct PointerRouting {
     /// Where the pointer is, in the scene.
     position: Point,
@@ -264,6 +268,9 @@ struct PointerRouting {
     epoch: u32,
     /// Distinguishes one event from another for a client that must quote one back.
     serial: u32,
+    modifiers: Modifiers,
+    /// Keys held, so focus arriving mid-chord can say what is down. Bounded by `MAX_HELD_KEYS`.
+    held: BTreeSet<PhysicalKey>,
     /// The shell holding the pointer, if one asked for it.
     ///
     /// Set by a shell during a press it was told about, and cleared when the button comes up.
@@ -558,6 +565,10 @@ impl CompositorState {
             ClientRequest::GetPointer { seat, new_id } => {
                 self.expect_kind(connection, seat, ObjectKind::Seat)?;
                 self.allocate_client(connection, new_id, ObjectKind::Pointer, Object::Global)
+            }
+            ClientRequest::GetKeyboard { seat, new_id } => {
+                self.expect_kind(connection, seat, ObjectKind::Seat)?;
+                self.allocate_client(connection, new_id, ObjectKind::Keyboard, Object::Global)
             }
             ClientRequest::CreateRegistry { new_id } => {
                 self.allocate_client(connection, new_id, ObjectKind::Registry, Object::Registry)?;
@@ -1237,13 +1248,35 @@ impl CompositorState {
             return Ok(Vec::new());
         }
         let mut events = Vec::with_capacity(2);
+        self.pointer.serial = self.pointer.serial.wrapping_add(1);
+        let serial = self.pointer.serial;
+        let epoch = self.pointer.epoch;
+        let modifiers = self.pointer.modifiers;
         if let Some(old) = self.keyboard_focus {
             events.push(FocusEvent::KeyboardLeave(old));
             self.push_event(old.connection, old.object_id, EventKind::KeyboardLeave);
+            self.send_to_keyboards(
+                old.connection,
+                EventKind::KeyFocusLost {
+                    serial,
+                    surface: old.object_id,
+                    epoch,
+                },
+            );
         }
         if let Some(new) = new_focus {
             events.push(FocusEvent::KeyboardEnter(new));
             self.push_event(new.connection, new.object_id, EventKind::KeyboardEnter);
+            // What is held travels with the focus, or a client believes keys are up that are not.
+            self.send_to_keyboards(
+                new.connection,
+                EventKind::KeyFocusGained {
+                    serial,
+                    surface: new.object_id,
+                    modifiers,
+                    epoch,
+                },
+            );
         }
         self.keyboard_focus = new_focus;
         let handle = new_focus
@@ -1828,6 +1861,9 @@ impl CompositorState {
             );
         }
         self.pointer.buttons_held = 0;
+        // Keys held in the old world are not held in the new one.
+        self.pointer.held.clear();
+        self.pointer.modifiers = Modifiers::default();
         self.pointer.epoch = self.pointer.epoch.wrapping_add(1);
     }
 
@@ -1946,6 +1982,75 @@ impl CompositorState {
                     }
                 }
             }
+        }
+    }
+
+    /// Which modifiers are held on the seat.
+    #[must_use]
+    pub const fn modifiers(&self) -> Modifiers {
+        self.pointer.modifiers
+    }
+
+    /// Press or release a key, routing it to whatever holds focus. The key is a physical
+    /// position; what it means depends on a layout the compositor does not own.
+    pub fn key(&mut self, key: PhysicalKey, pressed: bool, time_ns: u64) {
+        let changed = if pressed {
+            self.pointer.held.len() < MAX_HELD_KEYS && self.pointer.held.insert(key)
+        } else {
+            self.pointer.held.remove(&key)
+        };
+        if !changed {
+            // Already down, or not down. Neither is a state change.
+            return;
+        }
+        if let Some(modifier) = Modifiers::of(key) {
+            self.pointer.modifiers = if pressed {
+                self.pointer.modifiers.with(modifier)
+            } else {
+                self.pointer.modifiers.without(modifier)
+            };
+        }
+
+        let Some(target) = self.keyboard_focus else {
+            return;
+        };
+        self.pointer.serial = self.pointer.serial.wrapping_add(1);
+        let serial = self.pointer.serial;
+        let epoch = self.pointer.epoch;
+        let modifiers = self.pointer.modifiers;
+        self.send_to_keyboards(
+            target.connection,
+            EventKind::Key {
+                serial,
+                time_ns,
+                key,
+                pressed,
+                epoch,
+            },
+        );
+        if Modifiers::of(key).is_some() {
+            self.send_to_keyboards(
+                target.connection,
+                EventKind::KeyModifiers { modifiers, epoch },
+            );
+        }
+    }
+
+    /// Send to every keyboard object a connection holds.
+    fn send_to_keyboards(&mut self, connection: ConnectionId, event: EventKind) {
+        let keyboards: Vec<_> = self
+            .connections
+            .get(&connection)
+            .map(|client| {
+                client
+                    .registry
+                    .ids()
+                    .filter(|id| client.registry.kind_of(*id) == Some(ObjectKind::Keyboard))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for keyboard in keyboards {
+            self.push_event(connection, keyboard, event.clone());
         }
     }
 
