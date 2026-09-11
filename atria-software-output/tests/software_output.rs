@@ -521,3 +521,154 @@ fn a_commit_read_for_a_failed_frame_is_still_consumed_exactly_once() {
         "the first surface is in the frame the second one finally allowed"
     );
 }
+
+/// Every pixel two consecutive frames disagree on, found by comparing all of them.
+fn disagreeing_pixels(before: &[u8], after: &[u8], width: u32) -> Vec<(u32, u32)> {
+    before
+        .chunks_exact(4)
+        .zip(after.chunks_exact(4))
+        .enumerate()
+        .filter(|(_, (old, new))| old != new)
+        .map(|(index, _)| {
+            let index = u32::try_from(index).unwrap_or(u32::MAX);
+            (index % width, index / width)
+        })
+        .collect()
+}
+
+fn inside(rect: Rect, x: u32, y: u32) -> bool {
+    let left = u32::try_from(rect.x).unwrap_or(u32::MAX);
+    let top = u32::try_from(rect.y).unwrap_or(u32::MAX);
+    x >= left && y >= top && x < left + rect.width && y < top + rect.height
+}
+
+#[test]
+fn reported_damage_covers_every_pixel_that_changed() {
+    let (mut state, connection) = setup();
+    let mut store = BufferStore::new();
+    let width = 64;
+    let height = 48;
+    for (index, (surface, buffer, fill)) in [(257_u32, 300_u32, 0x31_u8), (258, 301, 0x77)]
+        .into_iter()
+        .enumerate()
+    {
+        create_surface(&mut state, connection, surface);
+        state
+            .place_surface(
+                SurfaceKey {
+                    connection,
+                    object_id: id(surface),
+                },
+                Point {
+                    x: 4 + 12 * i32::try_from(index).unwrap_or(0),
+                    y: 6,
+                },
+            )
+            .unwrap_or_else(|error| panic!("placement is valid: {error:?}"));
+        let descriptor = packed_descriptor(20, 16);
+        import_attach_commit(&mut state, connection, surface, buffer, descriptor, None);
+        store_buffer(
+            &mut store,
+            connection,
+            buffer,
+            descriptor,
+            vec![fill; 20 * 16 * 4],
+        );
+    }
+    let mut output = SoftwareOutput::new(Size { width, height }, layout())
+        .unwrap_or_else(|error| panic!("output is valid: {error:?}"));
+    output
+        .compose(&mut state, &store, 1)
+        .unwrap_or_else(|error| panic!("the first frame builds: {error:?}"));
+
+    // Each of the ways one frame can differ from the one before it.
+    let moves: [(u32, i32, i32); 7] = [
+        (257, 20, 6),  // moved right
+        (257, 20, 20), // moved down, now overlapping the other
+        (258, -8, 2),  // half off the left edge
+        (258, -40, 2), // wholly off the screen
+        (258, 50, 40), // back on, in the bottom right corner
+        (257, 4, 6),   // moved back
+        (258, 16, 6),  // moved back, overlapping again
+    ];
+    for (step, (surface, x, y)) in moves.into_iter().enumerate() {
+        let before = output.frame().bytes().to_vec();
+        state
+            .place_surface(
+                SurfaceKey {
+                    connection,
+                    object_id: id(surface),
+                },
+                Point { x, y },
+            )
+            .unwrap_or_else(|error| panic!("placement is valid: {error:?}"));
+        output
+            .compose(&mut state, &store, 2 + step as u64)
+            .unwrap_or_else(|error| panic!("the frame builds: {error:?}"));
+
+        let damage: Vec<Rect> = output.damage().to_vec();
+        let changed = disagreeing_pixels(&before, output.frame().bytes(), width);
+        for (x, y) in changed {
+            assert!(
+                damage.iter().any(|rect| inside(*rect, x, y)),
+                "step {step}: pixel ({x}, {y}) changed but no reported rectangle holds it: \
+                 {damage:?}"
+            );
+        }
+    }
+
+    // Raising one over the other changes pixels without moving or redrawing anything.
+    for (step, surface) in [257_u32, 258, 257].into_iter().enumerate() {
+        let before = output.frame().bytes().to_vec();
+        state
+            .raise_surface(SurfaceKey {
+                connection,
+                object_id: id(surface),
+            })
+            .unwrap_or_else(|error| panic!("raise is valid: {error:?}"));
+        output
+            .compose(&mut state, &store, 20 + step as u64)
+            .unwrap_or_else(|error| panic!("the frame builds: {error:?}"));
+
+        let damage: Vec<Rect> = output.damage().to_vec();
+        let changed = disagreeing_pixels(&before, output.frame().bytes(), width);
+        assert!(
+            !changed.is_empty() || step > 0,
+            "raising the lower surface has to change something for this to prove anything"
+        );
+        for (x, y) in changed {
+            assert!(
+                damage.iter().any(|rect| inside(*rect, x, y)),
+                "raise {step}: pixel ({x}, {y}) changed but no reported rectangle holds it: \
+                 {damage:?}"
+            );
+        }
+    }
+
+    // New content in the same place, which moves nothing and restacks nothing.
+    let before = output.frame().bytes().to_vec();
+    let descriptor = packed_descriptor(20, 16);
+    import_attach_commit(&mut state, connection, 257, 302, descriptor, None);
+    store_buffer(
+        &mut store,
+        connection,
+        302,
+        descriptor,
+        vec![0xc4; 20 * 16 * 4],
+    );
+    output
+        .compose(&mut state, &store, 30)
+        .unwrap_or_else(|error| panic!("the frame builds: {error:?}"));
+    let damage: Vec<Rect> = output.damage().to_vec();
+    let changed = disagreeing_pixels(&before, output.frame().bytes(), width);
+    assert!(
+        !changed.is_empty(),
+        "new content has to change something for this to prove anything"
+    );
+    for (x, y) in changed {
+        assert!(
+            damage.iter().any(|rect| inside(*rect, x, y)),
+            "redraw: pixel ({x}, {y}) changed but no reported rectangle holds it: {damage:?}"
+        );
+    }
+}

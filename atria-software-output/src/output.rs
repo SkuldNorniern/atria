@@ -31,6 +31,14 @@ struct SurfaceImage {
     bytes: Vec<u8>,
 }
 
+/// Where a surface was drawn, and how far up the stack. A change to either moves pixels without
+/// the surface's content changing at all.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Placement {
+    rect: Rect,
+    depth: usize,
+}
+
 #[derive(Clone, Debug)]
 pub struct SoftwareOutput {
     frame: Frame,
@@ -38,6 +46,17 @@ pub struct SoftwareOutput {
     /// frame, which at 1280x720 is 3.5 MB of churn per pointer movement.
     spare: Frame,
     surfaces: BTreeMap<SurfaceKey, SurfaceImage>,
+    /// Where each surface was drawn in the frame before this one.
+    placed: BTreeMap<SurfaceKey, Placement>,
+    /// Rectangles covering every pixel of the last frame that differs from the one before it.
+    ///
+    /// A frame is cleared and rebuilt from its surfaces, so two frames can differ only where a
+    /// surface was added, removed, moved, changed depth or changed content. Each of those
+    /// contributes the rectangle it left and the one it took, and everywhere else both frames
+    /// hold the same surfaces at the same depths over the same ground. Conservative by
+    /// construction: never smaller than the difference, sometimes larger.
+    damage: Vec<Rect>,
+    composed_once: bool,
 }
 
 impl SoftwareOutput {
@@ -46,12 +65,89 @@ impl SoftwareOutput {
             frame: Frame::new(size, layout)?,
             spare: Frame::new(size, layout)?,
             surfaces: BTreeMap::new(),
+            placed: BTreeMap::new(),
+            damage: Vec::new(),
+            composed_once: false,
         })
     }
 
     #[must_use]
     pub const fn frame(&self) -> &Frame {
         &self.frame
+    }
+
+    /// What the last composed frame changed, relative to the one before it.
+    #[must_use]
+    pub fn damage(&self) -> &[Rect] {
+        &self.damage
+    }
+
+    /// The part of `size` placed at `origin` that lands on the output, or `None` for none of it.
+    fn clipped(&self, origin_x: i64, origin_y: i64, size: Size) -> Option<Rect> {
+        let left = origin_x.max(0);
+        let top = origin_y.max(0);
+        let right = origin_x
+            .saturating_add(i64::from(size.width))
+            .min(i64::from(self.frame.size().width));
+        let bottom = origin_y
+            .saturating_add(i64::from(size.height))
+            .min(i64::from(self.frame.size().height));
+        if left >= right || top >= bottom {
+            return None;
+        }
+        Some(Rect {
+            x: i32::try_from(left).ok()?,
+            y: i32::try_from(top).ok()?,
+            width: u32::try_from(right - left).ok()?,
+            height: u32::try_from(bottom - top).ok()?,
+        })
+    }
+
+    /// Record what this frame changed, and where every surface now sits.
+    ///
+    /// `origins` is every surface in stacking order; `redrawn` is those whose pixels were read
+    /// again. A surface that kept its rectangle, its depth and its content cannot have changed a
+    /// pixel, so it contributes nothing. Anything else contributes the rectangle it left and the
+    /// one it took.
+    fn note_damage(&mut self, origins: &[(SurfaceKey, i64, i64)], redrawn: &BTreeSet<SurfaceKey>) {
+        let mut now = BTreeMap::new();
+        for (depth, &(surface, origin_x, origin_y)) in origins.iter().enumerate() {
+            let Some(size) = self.surfaces.get(&surface).map(|image| image.size) else {
+                continue;
+            };
+            if let Some(rect) = self.clipped(origin_x, origin_y, size) {
+                now.insert(surface, Placement { rect, depth });
+            }
+        }
+
+        self.damage.clear();
+        if self.composed_once {
+            for (surface, place) in &now {
+                match self.placed.get(surface) {
+                    Some(before) if before == place && !redrawn.contains(surface) => {}
+                    Some(before) => {
+                        self.damage.push(before.rect);
+                        self.damage.push(place.rect);
+                    }
+                    None => self.damage.push(place.rect),
+                }
+            }
+            for (surface, before) in &self.placed {
+                if !now.contains_key(surface) {
+                    self.damage.push(before.rect);
+                }
+            }
+        } else {
+            // Nothing was on screen before the first frame, so all of it is new.
+            self.composed_once = true;
+            self.damage.push(Rect {
+                x: 0,
+                y: 0,
+                width: self.frame.size().width,
+                height: self.frame.size().height,
+            });
+        }
+        self.placed = now;
     }
 
     /// Composites one complete frame and releases each newly consumed client buffer.
@@ -69,6 +165,8 @@ impl SoftwareOutput {
         let mut active = BTreeSet::new();
         let mut consumed = Vec::new();
         let mut damage_count = 0_usize;
+        let mut origins: Vec<(SurfaceKey, i64, i64)> = Vec::new();
+        let mut redrawn = BTreeSet::new();
 
         for &surface in state.stacking_order() {
             active.insert(surface);
@@ -79,7 +177,8 @@ impl SoftwareOutput {
             let Some(position) = state.surface_position(surface) else {
                 return Err(ComposeError::MissingSurfacePosition(surface));
             };
-            checked_origin(surface, position, snapshot.offset)?;
+            let (origin_x, origin_y) = checked_origin(surface, position, snapshot.offset)?;
+            origins.push((surface, origin_x, origin_y));
 
             if self
                 .surfaces
@@ -88,6 +187,7 @@ impl SoftwareOutput {
             {
                 continue;
             }
+            redrawn.insert(surface);
             if !state
                 .commit_ready(surface)
                 .map_err(|_| ComposeError::StateChanged(surface))?
@@ -228,6 +328,9 @@ impl SoftwareOutput {
                 image.commit = Some(*commit);
             }
         }
+        // Last, with the frame built and its commits accounted for. A frame that failed leaves
+        // the recorded placement describing what is actually on screen.
+        self.note_damage(&origins, &redrawn);
 
         let report = FrameReport {
             timestamp_ns,
