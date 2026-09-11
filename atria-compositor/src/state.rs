@@ -143,6 +143,8 @@ struct PendingSurface {
 struct CurrentSurface {
     snapshot: SurfaceSnapshot,
     frame_callback: bool,
+    /// The serial the client asked with, echoed back when the frame is presented.
+    frame_serial: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -152,6 +154,8 @@ struct SurfaceState {
     pending: PendingSurface,
     current: Option<CurrentSurface>,
     frame_requested: bool,
+    /// The serial the client asked with, echoed back when the frame is presented.
+    frame_serial: u32,
     consecutive_deadline_misses: u8,
 }
 
@@ -535,6 +539,7 @@ impl CompositorState {
                         pending: PendingSurface::default(),
                         current: None,
                         frame_requested: false,
+                        frame_serial: 0,
                         consecutive_deadline_misses: 0,
                     }),
                 )
@@ -574,7 +579,9 @@ impl CompositorState {
             ClientRequest::Damage { surface, rect } => self.damage(connection, surface, rect),
             ClientRequest::Commit { surface } => self.commit(connection, surface),
             ClientRequest::SetRole { surface, role } => self.set_role(connection, surface, role),
-            ClientRequest::RequestFrame { surface } => self.request_frame(connection, surface),
+            ClientRequest::RequestFrame { surface, serial } => {
+                self.request_frame(connection, surface, serial)
+            }
             ClientRequest::SetRefreshRange {
                 surface,
                 min_hz,
@@ -663,7 +670,7 @@ impl CompositorState {
         if self.next_commit == u64::MAX {
             return Err(StateError::QuotaExceeded { object_id: surface });
         }
-        let (buffer, offset, damage, refresh_range, frame_callback, role, acquire_fence) = {
+        let (buffer, offset, damage, refresh_range, frame_callback, frame_serial, role, acquire_fence) = {
             let state = self.surface_mut(connection, surface)?;
             let Some((buffer, offset)) = state.pending.attachment.take() else {
                 return Err(StateError::InvalidState { object_id: surface });
@@ -681,12 +688,14 @@ impl CompositorState {
             });
             let acquire_fence = state.pending.acquire_fence.take();
             let callback = take(&mut state.frame_requested);
+            let frame_serial = state.frame_serial;
             (
                 buffer,
                 offset,
                 damage,
                 refresh_range,
                 callback,
+                frame_serial,
                 state.role,
                 acquire_fence,
             )
@@ -717,6 +726,7 @@ impl CompositorState {
                 acquire_fence,
             },
             frame_callback,
+            frame_serial,
         });
         Ok(())
     }
@@ -742,12 +752,14 @@ impl CompositorState {
         &mut self,
         connection: ConnectionId,
         surface: ObjectId,
+        serial: u32,
     ) -> Result<(), StateError> {
         let state = self.surface_mut(connection, surface)?;
         if state.frame_requested {
             return Err(StateError::InvalidState { object_id: surface });
         }
         state.frame_requested = true;
+        state.frame_serial = serial;
         Ok(())
     }
 
@@ -780,6 +792,7 @@ impl CompositorState {
             })?;
         let commit = current.snapshot.commit;
         let callback = current.frame_callback;
+        let frame_serial = current.frame_serial;
         if let Some(fence) = current.snapshot.acquire_fence {
             let Object::Fence(fence_state) =
                 self.object(surface.connection, fence, ObjectKind::Fence)?
@@ -812,7 +825,10 @@ impl CompositorState {
             self.push_event(
                 surface.connection,
                 surface.object_id,
-                EventKind::FrameDone { timestamp_ns },
+                EventKind::FrameDone {
+                    serial: frame_serial,
+                    timestamp_ns,
+                },
             );
             if let Some(current) = self
                 .surface_mut(surface.connection, surface.object_id)?

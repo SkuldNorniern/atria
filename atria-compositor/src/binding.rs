@@ -10,8 +10,8 @@
 
 use atria_protocol::interface::{Interface, MessageKind, Operation, decode_operation};
 use atria_protocol::message::{
-    Attach, Bind, Commit, CreateBuffer, CreatePool, DamageBuffer, GetRegistry, GetToplevel, NewId,
-    SetTitle, SizeHint,
+    Attach, Bind, Commit, CreateBuffer, CreatePool, DamageBuffer, GetRegistry, GetToplevel,
+    GlobalName, NewId, SetTitle, SizeHint,
 };
 use atria_protocol::wire::{Frame, HandleIndex};
 use atria_protocol::{DecodeError, ObjectId, Opcode};
@@ -129,6 +129,10 @@ pub enum DecodedRequest<'a> {
     },
     Commit {
         surface: ObjectId,
+    },
+    RequestFrame {
+        surface: ObjectId,
+        serial: u32,
     },
     Destroy {
         object: ObjectId,
@@ -249,6 +253,13 @@ pub fn decode<'a>(kind: ObjectKind, frame: &Frame<'a>) -> Result<DecodedRequest<
                 },
             })
         }
+        Operation::SurfaceFrame => {
+            let payload = GlobalName::decode(frame.payload)?;
+            Ok(DecodedRequest::RequestFrame {
+                surface: object,
+                serial: payload.name,
+            })
+        }
         Operation::SurfaceCommit => {
             // `commit_id` and `configure_serial` decode and are not yet carried into the state
             // machine: it assigns its own commit identifiers, and nothing sends a configure while
@@ -333,6 +344,9 @@ pub fn resolve(
         }),
         DecodedRequest::Damage { surface, rect } => Ok(ClientRequest::Damage { surface, rect }),
         DecodedRequest::Commit { surface } => Ok(ClientRequest::Commit { surface }),
+        DecodedRequest::RequestFrame { surface, serial } => {
+            Ok(ClientRequest::RequestFrame { surface, serial })
+        }
         DecodedRequest::Destroy { object } => Ok(ClientRequest::Destroy { object }),
         DecodedRequest::CreatePool {
             new_id,

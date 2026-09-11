@@ -305,8 +305,11 @@ pub enum ClientRequest {
         surface: ObjectId,
         role: SurfaceRole,
     },
+    /// Ask to be told when the next frame is presented. The serial is the client's own, echoed
+    /// back in `frame_done`, so a client with several outstanding requests knows which answered.
     RequestFrame {
         surface: ObjectId,
+        serial: u32,
     },
     SetRefreshRange {
         surface: ObjectId,
@@ -352,6 +355,7 @@ pub enum EventKind {
         fence: ObjectId,
     },
     FrameDone {
+        serial: u32,
         timestamp_ns: u64,
     },
     FrameDeadline {

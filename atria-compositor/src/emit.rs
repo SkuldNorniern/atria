@@ -117,12 +117,12 @@ pub fn encode_event(event: &Event, sequence: u32, out: &mut [u8]) -> Result<usiz
         }
         EventKind::Close => emit_empty(object, Operation::ToplevelClose, sequence, out),
         EventKind::BufferRelease => emit_empty(object, Operation::BufferRelease, sequence, out),
-        EventKind::FrameDone { timestamp_ns } => {
+        EventKind::FrameDone {
+            serial,
+            timestamp_ns,
+        } => {
             let payload = FrameDone {
-                // A frame callback's serial is the client's, and the state machine does not yet
-                // carry it. Zero until `surface.frame` is modelled with the serial it was asked
-                // with.
-                serial: 0,
+                serial: *serial,
                 timestamp_ns: *timestamp_ns,
             };
             emit(object, Operation::SurfaceFrameDone, sequence, &payload, out)
