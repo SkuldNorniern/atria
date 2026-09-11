@@ -23,7 +23,10 @@ pub struct FrameReport {
 
 #[derive(Clone, Debug)]
 struct SurfaceImage {
-    commit: CommitId,
+    /// The commit these bytes hold, once the frame carrying it has been presented and its buffer
+    /// released. `None` while the bytes are newer than anything a client has been told about, so
+    /// a frame that failed part way is read again rather than counted as already consumed.
+    commit: Option<CommitId>,
     size: Size,
     bytes: Vec<u8>,
 }
@@ -81,7 +84,7 @@ impl SoftwareOutput {
             if self
                 .surfaces
                 .get(&surface)
-                .is_some_and(|image| image.commit == snapshot.commit)
+                .is_some_and(|image| image.commit == Some(snapshot.commit))
             {
                 continue;
             }
@@ -163,7 +166,7 @@ impl SoftwareOutput {
                 self.surfaces.insert(
                     surface,
                     SurfaceImage {
-                        commit: snapshot.commit,
+                        commit: None,
                         size: descriptor.size,
                         bytes,
                     },
@@ -187,10 +190,10 @@ impl SoftwareOutput {
                         rect,
                     )?;
                 }
-                image.commit = snapshot.commit;
+                image.commit = None;
             }
             damage_count = damage_count.saturating_add(snapshot.damage.len());
-            consumed.push((surface, snapshot.buffer));
+            consumed.push((surface, snapshot.buffer, snapshot.commit));
         }
 
         self.surfaces.retain(|surface, _| active.contains(surface));
@@ -210,13 +213,20 @@ impl SoftwareOutput {
             blit_surface(surface, image, position, snapshot.offset, &mut self.spare)?;
         }
 
-        for (surface, buffer) in &consumed {
+        for (surface, buffer, _) in &consumed {
             state
                 .present(*surface, timestamp_ns)
                 .map_err(|_| ComposeError::StateChanged(*surface))?;
             state
                 .release_buffer(surface.connection, *buffer)
                 .map_err(|_| ComposeError::StateChanged(*surface))?;
+        }
+        // Only now is a commit accounted for. Until the release reaches the client, a frame that
+        // failed leaves the pixels staged and the commit still owing.
+        for (surface, _, commit) in &consumed {
+            if let Some(image) = self.surfaces.get_mut(surface) {
+                image.commit = Some(*commit);
+            }
         }
 
         let report = FrameReport {

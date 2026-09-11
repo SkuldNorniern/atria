@@ -450,3 +450,74 @@ fn one_buffer_can_be_presented_repeatedly() {
 
     assert_eq!(sink.frames_presented(), 4);
 }
+
+#[test]
+fn a_commit_read_for_a_failed_frame_is_still_consumed_exactly_once() {
+    let (mut state, connection) = setup();
+    create_surface(&mut state, connection, 257);
+    create_surface(&mut state, connection, 258);
+    state
+        .place_surface(
+            SurfaceKey {
+                connection,
+                object_id: id(258),
+            },
+            Point { x: 2, y: 0 },
+        )
+        .unwrap_or_else(|error| panic!("surface placement is valid: {error:?}"));
+    let descriptor = packed_descriptor(2, 2);
+    import_attach_commit(&mut state, connection, 257, 259, descriptor, None);
+    import_attach_commit(&mut state, connection, 258, 260, descriptor, None);
+    let mut store = BufferStore::new();
+    store_buffer(&mut store, connection, 259, descriptor, vec![9; 16]);
+    let mut output = SoftwareOutput::new(
+        Size {
+            width: 4,
+            height: 2,
+        },
+        layout(),
+    )
+    .unwrap_or_else(|error| panic!("output is valid: {error:?}"));
+
+    // The second surface names a buffer the store never received, so the frame cannot be built
+    // after the first surface has already been read.
+    let error = output
+        .compose(&mut state, &store, 1)
+        .expect_err("a surface with no buffer fails the frame");
+    assert!(matches!(error, ComposeError::MissingBuffer(_)), "{error:?}");
+    assert!(
+        matches!(
+            state.buffer_state(connection, id(259)),
+            Some(BufferState::CompositorHeld { .. })
+        ),
+        "a frame that was never presented releases nothing"
+    );
+
+    store_buffer(&mut store, connection, 260, descriptor, vec![3; 16]);
+    let report = output
+        .compose(&mut state, &store, 2)
+        .unwrap_or_else(|error| panic!("the frame builds once every buffer is there: {error:?}"));
+
+    assert_eq!(
+        report.commits_consumed, 2,
+        "both commits are consumed by the frame that finally presents them"
+    );
+    assert_eq!(
+        state.buffer_state(connection, id(259)),
+        Some(BufferState::Available)
+    );
+    assert_eq!(
+        state.buffer_state(connection, id(260)),
+        Some(BufferState::Available)
+    );
+    assert_eq!(
+        output
+            .frame()
+            .bytes()
+            .iter()
+            .filter(|&&byte| byte == 9)
+            .count(),
+        16,
+        "the first surface is in the frame the second one finally allowed"
+    );
+}
