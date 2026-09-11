@@ -4,7 +4,7 @@
 //! socket and the same wire format a real client uses — there is no in-process shortcut, because
 //! a shortcut would prove the shortcut works.
 //!
-//! Run with: cargo run --example draw -- <socket-path> [width height rrggbb]
+//! Run with: cargo run --example draw -- <socket-path> [width height rrggbb title]
 
 use std::env::args;
 use std::ffi::c_void;
@@ -15,8 +15,8 @@ use std::process::exit;
 use atria_compositor::FORMAT_XRGB8888;
 use atria_protocol::interface::{Interface, Operation};
 use atria_protocol::message::{
-    Attach, Bind, Commit, CreateBuffer, CreatePool, DamageBuffer, EncodePayload, NewId,
-    RegistryGlobal, encode_message,
+    Attach, Bind, Commit, CreateBuffer, CreatePool, DamageBuffer, EncodePayload, GetToplevel,
+    NewId, RegistryGlobal, SetTitle, encode_message,
 };
 use atria_protocol::wire::{Frame, HandleIndex, HandleKind, MAX_MESSAGE_SIZE};
 use atria_protocol::{ObjectId, Opcode};
@@ -34,6 +34,8 @@ const SHM: u32 = 4;
 const POOL: u32 = 5;
 const BUFFER: u32 = 6;
 const SURFACE: u32 = 7;
+const SHELL: u32 = 8;
+const TOPLEVEL: u32 = 12;
 
 fn id(raw: u32) -> ObjectId {
     ObjectId::from_raw(raw)
@@ -41,13 +43,14 @@ fn id(raw: u32) -> ObjectId {
 
 fn main() {
     let path = args().nth(1).unwrap_or_else(|| {
-        eprintln!("draw: usage: draw <socket-path> [width height rrggbb]");
+        eprintln!("draw: usage: draw <socket-path> [width height rrggbb title]");
         exit(2);
     });
     // Size and colour are arguments so that two of these are telling apart in one frame.
     let width = number(2, 400);
     let height = number(3, 300);
     let colour = colour(4, 0x2f_9e_d8);
+    let title = args().nth(5).unwrap_or_else(|| String::from("window"));
 
     let mut client = Client::new(connect_to(&path));
 
@@ -64,6 +67,7 @@ fn main() {
     // changing.
     let compositor_name = client.global_named(Interface::Compositor);
     let shm_name = client.global_named(Interface::Shm);
+    let shell_name = client.global_named(Interface::Shell);
 
     client.request(
         id(REGISTRY),
@@ -81,6 +85,16 @@ fn main() {
             name: shm_name,
             version: 1,
             new_id: id(SHM),
+        },
+    );
+
+    client.request(
+        id(REGISTRY),
+        Operation::RegistryBind,
+        &Bind {
+            name: shell_name,
+            version: 1,
+            new_id: id(SHELL),
         },
     );
 
@@ -122,6 +136,22 @@ fn main() {
             new_id: id(SURFACE),
         },
     );
+    // A surface with a window role is a window, which is what a shell arranges. Without this the
+    // client draws pixels nothing can be asked to move.
+    client.request(
+        id(SHELL),
+        Operation::ShellGetToplevel,
+        &GetToplevel {
+            surface: id(SURFACE),
+            new_id: id(TOPLEVEL),
+        },
+    );
+    client.request(
+        id(TOPLEVEL),
+        Operation::ToplevelSetTitle,
+        &SetTitle { title: &title },
+    );
+
     client.request(
         id(SURFACE),
         Operation::SurfaceAttach,
@@ -155,8 +185,20 @@ fn main() {
     // Held open deliberately. A connection that closes takes its buffers with it, and there
     // would be nothing left to look at.
     loop {
-        if client.transport.receive().is_err() {
+        let Ok(mut envelope) = client.transport.receive() else {
             return;
+        };
+        let bytes = envelope.take_bytes();
+        // An opcode is local to its interface, so which object a message names is what says
+        // what it is. Only the display reports errors.
+        if let Ok(frame) = Frame::decode(&bytes)
+            && frame.header.object_id == ObjectId::DISPLAY
+            && frame.header.opcode.into_raw() == Operation::DisplayError.opcode()
+        {
+            eprintln!(
+                "draw: the compositor refused something: {:?}",
+                frame.payload
+            );
         }
     }
 }
@@ -271,7 +313,11 @@ impl Client {
                 .unwrap_or_else(|error| panic!("an announcement must arrive: {error:?}"));
             let frame = Frame::decode(envelope.bytes())
                 .unwrap_or_else(|error| panic!("an event must decode: {error:?}"));
-            if frame.header.opcode.into_raw() != Operation::RegistryGlobal.opcode() {
+            // Addressed to the registry, because an opcode alone does not say which interface a
+            // message belongs to.
+            if frame.header.object_id != id(REGISTRY)
+                || frame.header.opcode.into_raw() != Operation::RegistryGlobal.opcode()
+            {
                 continue;
             }
             let announced = RegistryGlobal::decode(frame.payload)
