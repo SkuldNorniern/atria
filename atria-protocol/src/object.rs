@@ -14,6 +14,9 @@ pub const FIRST_CLIENT_ALLOCATED_ID: u32 = 2;
 pub struct ObjectId(u32);
 
 impl ObjectId {
+    /// The identifier that names nothing. Attaching it to a surface detaches the surface.
+    pub const NULL: Self = Self(0);
+
     /// The display singleton used by the draft's wire examples.
     pub const DISPLAY: Self = Self(1);
 
