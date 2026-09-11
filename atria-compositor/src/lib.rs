@@ -16,6 +16,7 @@ mod model;
 mod output;
 mod registry;
 mod resolve;
+mod shell;
 mod state;
 
 pub use binding::{BindError, DecodedRequest, decode, interface_of, resolve};
@@ -32,4 +33,5 @@ pub use output::{
 };
 pub use registry::{ObjectRegistry, Teardown};
 pub use resolve::{HandleResolver, ResolveError, SharedMemory};
+pub use shell::{ShellError, ToplevelHandle, ToplevelRecord};
 pub use state::{BufferSource, CompositorState, ConnectionLimits, NegotiationError, ServerLimits};

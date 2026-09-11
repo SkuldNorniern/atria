@@ -20,8 +20,11 @@ use crate::model::{
 use atria_protocol::interface::Interface;
 
 use crate::binding::interface_of;
+use alloc::string::String;
+
 use crate::registry::{ObjectRegistry, Teardown};
 use crate::resolve::SharedMemory;
+use crate::shell::{ShellError, ToplevelHandle, ToplevelRecord};
 
 /// Bounds on the compositor as a whole, rather than on any one connection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -179,6 +182,11 @@ struct ToplevelState {
     maximum: Option<Size>,
     /// The serial of the most recent configure, so a commit answering it can be recognised.
     last_configure: u32,
+    /// The size the compositor last asked for, retained so a shell taking over is told what the
+    /// window was already asked to be rather than having to guess or re-ask.
+    configured: Option<Size>,
+    /// How a shell refers to this window.
+    handle: ToplevelHandle,
 }
 
 /// Where a buffer's pixels live: a region of memory a client handed over.
@@ -235,6 +243,10 @@ pub struct CompositorState {
     globals: BTreeMap<u32, Global>,
     next_global: u32,
     next_configure: u32,
+    /// Windows by the handle a shell names them with. Compositor-wide, so it outlives any one
+    /// connection — including a shell's.
+    toplevels: BTreeMap<ToplevelHandle, (ConnectionId, ObjectId)>,
+    next_handle: u64,
     server_limits: ServerLimits,
     limits: ConnectionLimits,
     next_connection: u64,
@@ -260,6 +272,8 @@ impl CompositorState {
             globals: BTreeMap::new(),
             next_global: 1,
             next_configure: 1,
+            toplevels: BTreeMap::new(),
+            next_handle: 1,
             server_limits,
             limits,
             next_connection: 1,
@@ -670,7 +684,16 @@ impl CompositorState {
         if self.next_commit == u64::MAX {
             return Err(StateError::QuotaExceeded { object_id: surface });
         }
-        let (buffer, offset, damage, refresh_range, frame_callback, frame_serial, role, acquire_fence) = {
+        let (
+            buffer,
+            offset,
+            damage,
+            refresh_range,
+            frame_callback,
+            frame_serial,
+            role,
+            acquire_fence,
+        ) = {
             let state = self.surface_mut(connection, surface)?;
             let Some((buffer, offset)) = state.pending.attachment.take() else {
                 return Err(StateError::InvalidState { object_id: surface });
@@ -1314,6 +1337,10 @@ impl CompositorState {
                 destroyed.push((id, entry.kind));
             }
         }
+        // A connection going takes its windows with it, so the handles a shell held for them are
+        // retired. A shell asking about one afterwards is told the window is gone rather than
+        // reaching whatever next occupied the number.
+        self.toplevels.retain(|_, (owner, _)| *owner != connection);
         self.scene
             .positions
             .retain(|key, _| key.connection != connection);
@@ -1462,6 +1489,13 @@ impl CompositorState {
                 self.destroy_object(connection, dependent, destroyed);
             }
         }
+        // Retired before the object goes, and never reissued: a shell's request already in flight
+        // must not land on a different window than the one it named.
+        if kind == ObjectKind::Toplevel
+            && let Some(handle) = self.toplevel_handle(connection, object_id)
+        {
+            self.toplevels.remove(&handle);
+        }
         if let Some(client) = self.connections.get_mut(&connection) {
             if client.registry.remove(object_id).is_some() {
                 destroyed.push((object_id, kind));
@@ -1596,6 +1630,11 @@ impl CompositorState {
             return Err(StateError::InvalidState { object_id: surface });
         }
         self.check_kind_quota(connection, ObjectKind::Toplevel)?;
+        let handle = ToplevelHandle(self.next_handle);
+        self.next_handle = self
+            .next_handle
+            .checked_add(1)
+            .ok_or(StateError::QuotaExceeded { object_id: new_id })?;
         self.allocate_client(
             connection,
             new_id,
@@ -1606,8 +1645,196 @@ impl CompositorState {
                 minimum: None,
                 maximum: None,
                 last_configure: 0,
+                configured: None,
+                handle,
             }),
+        )?;
+        self.toplevels.insert(handle, (connection, new_id));
+        Ok(())
+    }
+
+    /// Every window that exists, as a shell refers to them.
+    ///
+    /// This is the restart contract in one call: a shell starting for the first time and a shell
+    /// replacing one that died are handed the same thing, so neither has to be a special case and
+    /// a replacement never begins from nothing.
+    #[must_use]
+    pub fn shell_toplevels(&self) -> Vec<ToplevelRecord> {
+        self.toplevels
+            .iter()
+            .filter_map(|(handle, (connection, object_id))| {
+                let entry = self
+                    .connections
+                    .get(connection)?
+                    .registry
+                    .entry(*object_id)
+                    .ok()?;
+                let Object::Toplevel(state) = &entry.value else {
+                    return None;
+                };
+                Some(ToplevelRecord {
+                    handle: *handle,
+                    connection: *connection,
+                    object_id: *object_id,
+                    title: String::from(state.title.as_str()),
+                    configured: state.configured,
+                })
+            })
+            .collect()
+    }
+
+    /// Resolve a shell's handle, checking the shell holds the authority to use it.
+    fn shell_target(
+        &self,
+        shell: ConnectionId,
+        handle: ToplevelHandle,
+    ) -> Result<(ConnectionId, ObjectId), ShellError> {
+        // Asked before the handle is looked up, so a program without the grant learns nothing
+        // about which windows exist by probing handles.
+        if !self
+            .capabilities(shell)
+            .is_some_and(|held| held.contains(Capability::ShellControl))
+        {
+            return Err(ShellError::NotGranted);
+        }
+        self.toplevels
+            .get(&handle)
+            .copied()
+            .ok_or(ShellError::UnknownHandle { handle })
+    }
+
+    /// Ask a window to adopt a size and a set of states, on a shell's behalf.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ShellError::NotGranted`] without the shell-control grant, and
+    /// [`ShellError::UnknownHandle`] for a window that has gone.
+    pub fn shell_configure(
+        &mut self,
+        shell: ConnectionId,
+        handle: ToplevelHandle,
+        size: Size,
+        state: u32,
+    ) -> Result<u32, ShellError> {
+        let (connection, object_id) = self.shell_target(shell, handle)?;
+        self.configure_toplevel(connection, object_id, size, state)
+            .map_err(|_| ShellError::UnknownHandle { handle })
+    }
+
+    /// Ask a window to close, on a shell's behalf. The window goes when its own client destroys it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::shell_configure`].
+    pub fn shell_close(
+        &mut self,
+        shell: ConnectionId,
+        handle: ToplevelHandle,
+    ) -> Result<(), ShellError> {
+        let (connection, object_id) = self.shell_target(shell, handle)?;
+        self.close_toplevel(connection, object_id)
+            .map_err(|_| ShellError::UnknownHandle { handle })
+    }
+
+    /// Place a window's surface, on a shell's behalf.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::shell_configure`].
+    pub fn shell_place(
+        &mut self,
+        shell: ConnectionId,
+        handle: ToplevelHandle,
+        position: Point,
+    ) -> Result<(), ShellError> {
+        let (connection, object_id) = self.shell_target(shell, handle)?;
+        let surface = self
+            .toplevel_surface(connection, object_id)
+            .ok_or(ShellError::UnknownHandle { handle })?;
+        self.place_surface(
+            SurfaceKey {
+                connection,
+                object_id: surface,
+            },
+            position,
         )
+        .map_err(|_| ShellError::UnknownHandle { handle })
+    }
+
+    /// Raise a window's surface to the front, on a shell's behalf.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::shell_configure`].
+    pub fn shell_raise(
+        &mut self,
+        shell: ConnectionId,
+        handle: ToplevelHandle,
+    ) -> Result<(), ShellError> {
+        let (connection, object_id) = self.shell_target(shell, handle)?;
+        let surface = self
+            .toplevel_surface(connection, object_id)
+            .ok_or(ShellError::UnknownHandle { handle })?;
+        self.raise_surface(SurfaceKey {
+            connection,
+            object_id: surface,
+        })
+        .map_err(|_| ShellError::UnknownHandle { handle })
+    }
+
+    /// Move keyboard focus to a window, on a shell's behalf.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::shell_configure`].
+    pub fn shell_focus(
+        &mut self,
+        shell: ConnectionId,
+        handle: ToplevelHandle,
+    ) -> Result<(), ShellError> {
+        let (connection, object_id) = self.shell_target(shell, handle)?;
+        let surface = self
+            .toplevel_surface(connection, object_id)
+            .ok_or(ShellError::UnknownHandle { handle })?;
+        self.set_keyboard_focus(Some(SurfaceKey {
+            connection,
+            object_id: surface,
+        }))
+        .map(|_| ())
+        .map_err(|_| ShellError::UnknownHandle { handle })
+    }
+
+    /// How a shell refers to this window.
+    #[must_use]
+    pub fn toplevel_handle(
+        &self,
+        connection: ConnectionId,
+        toplevel: ObjectId,
+    ) -> Option<ToplevelHandle> {
+        let entry = self
+            .connections
+            .get(&connection)?
+            .registry
+            .entry(toplevel)
+            .ok()?;
+        match &entry.value {
+            Object::Toplevel(state) => Some(state.handle),
+            _ => None,
+        }
+    }
+
+    /// The surface a window is laid over.
+    fn toplevel_surface(&self, connection: ConnectionId, toplevel: ObjectId) -> Option<ObjectId> {
+        let entry = self
+            .connections
+            .get(&connection)?
+            .registry
+            .entry(toplevel)
+            .ok()?;
+        match &entry.value {
+            Object::Toplevel(state) => Some(state.surface),
+            _ => None,
+        }
     }
 
     /// The role object a surface already has, if any.
@@ -1675,7 +1902,9 @@ impl CompositorState {
         }
         let serial = self.next_configure;
         self.next_configure = self.next_configure.wrapping_add(1);
-        self.toplevel_mut(connection, toplevel)?.last_configure = serial;
+        let target = self.toplevel_mut(connection, toplevel)?;
+        target.last_configure = serial;
+        target.configured = Some(size);
         self.push_event(
             connection,
             toplevel,
