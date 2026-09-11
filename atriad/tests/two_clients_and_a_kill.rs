@@ -21,7 +21,7 @@ use atria_protocol::wire::{HandleIndex, HandleKind, Header, MAX_MESSAGE_SIZE};
 use atria_protocol::{ObjectId, Opcode};
 use atria_software_output::{HeadlessSink, PixelLayout};
 use atria_transport::{Transport, UnixTransport};
-use atriad::{Presenter, Session, SessionError, present_for, software_capabilities};
+use atriad::{Presenter, Session, SessionError, present_all, present_for, software_capabilities};
 use libc::{
     AF_UNIX, MFD_CLOEXEC, SOCK_CLOEXEC, SOCK_SEQPACKET, ftruncate, memfd_create, off_t, pwrite,
     socketpair,
@@ -520,4 +520,163 @@ fn a_clients_pixels_reach_a_frame_and_its_buffer_comes_back() {
         "the client is told its buffer is free"
     );
     assert_eq!(released.object_id, id(257));
+}
+
+/// Bring a client to a committed solid rectangle of its own colour and size.
+fn draw_solid(
+    client: &mut Client,
+    session: &mut Session<UnixTransport>,
+    state: &mut CompositorState,
+    side: u32,
+    colour: [u8; 4],
+) {
+    let bytes = (side * side * 4) as usize;
+    let region = memory(bytes);
+    let pixels: Vec<u8> = colour.iter().copied().cycle().take(bytes).collect();
+    write_at(&region, 0, &pixels);
+
+    client.request_with_handle(
+        id(10),
+        Operation::ShmCreatePool,
+        &CreatePool {
+            new_id: id(256),
+            memory: HandleIndex::new(0, HandleKind::SharedMemory),
+            size: bytes as u32,
+        },
+        &region,
+    );
+    session
+        .serve_one(state)
+        .unwrap_or_else(|error| panic!("the pool is adopted: {error:?}"));
+
+    client.request(
+        id(256),
+        Operation::ShmPoolCreateBuffer,
+        &CreateBuffer {
+            new_id: id(257),
+            offset: 0,
+            width: side,
+            height: side,
+            stride: side * 4,
+            format: FORMAT_XRGB8888,
+        },
+    );
+    session
+        .serve_one(state)
+        .unwrap_or_else(|error| panic!("the buffer is carved: {error:?}"));
+
+    client.request(
+        id(11),
+        Operation::CompositorCreateSurface,
+        &NewId { new_id: id(258) },
+    );
+    session
+        .serve_one(state)
+        .unwrap_or_else(|error| panic!("the surface is created: {error:?}"));
+
+    client.request(
+        id(258),
+        Operation::SurfaceAttach,
+        &Attach {
+            buffer: id(257),
+            x_offset: 0,
+            y_offset: 0,
+        },
+    );
+    session
+        .serve_one(state)
+        .unwrap_or_else(|error| panic!("the buffer is attached: {error:?}"));
+
+    client.request(
+        id(258),
+        Operation::SurfaceCommit,
+        &Commit {
+            commit_id: 1,
+            configure_serial: 0,
+        },
+    );
+    session
+        .serve_one(state)
+        .unwrap_or_else(|error| panic!("the frame is committed: {error:?}"));
+}
+
+/// One frame carries every client's pixels, and losing a client loses only that client's.
+///
+/// A buffer can be read only through the session that owns the memory behind it, so composing for
+/// several clients is not composing for one several times. This is the property that makes the
+/// server a compositor rather than a viewer for whichever client spoke last.
+#[test]
+fn one_frame_carries_every_clients_pixels_and_a_death_removes_only_its_own() {
+    let mut state = CompositorState::new(
+        software_capabilities(),
+        ServerLimits::default(),
+        ConnectionLimits::default(),
+    );
+    let globals = advertise(&mut state);
+
+    let (below_socket, below_server) = pair();
+    let (above_socket, above_server) = pair();
+    let mut below_client = Client::new(below_socket);
+    let mut above_client = Client::new(above_socket);
+    let mut below = accept(&mut state, below_server, &mut below_client, globals);
+    let mut above = accept(&mut state, above_server, &mut above_client, globals);
+
+    let under = [0x20_u8, 0x60, 0xc0, 0xff];
+    let over = [0xe0_u8, 0x8a, 0x2b, 0xff];
+    draw_solid(&mut below_client, &mut below, &mut state, 16, under);
+    draw_solid(&mut above_client, &mut above, &mut state, 8, over);
+
+    let mut presenter = Presenter::new(
+        Size {
+            width: 32,
+            height: 32,
+        },
+        PixelLayout::new(4).unwrap_or_else(|error| panic!("four bytes a pixel: {error:?}")),
+    )
+    .unwrap_or_else(|error| panic!("the output is usable: {error:?}"));
+    let mut sink = HeadlessSink::default();
+
+    let mut sessions = vec![below, above];
+    let report = present_all(&mut presenter, &mut state, &mut sessions, 1_000, &mut sink)
+        .unwrap_or_else(|error| panic!("the frame presents: {error:?}"));
+    assert_eq!(
+        report.surfaces_composited, 2,
+        "both clients are in the one frame"
+    );
+
+    fn pixel(presenter: &Presenter, x: usize, y: usize) -> Vec<u8> {
+        let offset = (y * 32 + x) * 4;
+        presenter.frame().bytes()[offset..offset + 4].to_vec()
+    }
+    assert_eq!(
+        pixel(&presenter, 2, 2),
+        over.to_vec(),
+        "the later surface covers the earlier where they overlap"
+    );
+    assert_eq!(
+        pixel(&presenter, 12, 12),
+        under.to_vec(),
+        "and the earlier one is still there where it does not"
+    );
+
+    // The client on top goes. Nothing about that belongs to the one underneath.
+    let departed = sessions.pop().expect("the second session");
+    state.close_connection(departed.connection());
+
+    let report = present_all(&mut presenter, &mut state, &mut sessions, 2_000, &mut sink)
+        .unwrap_or_else(|error| panic!("the frame still presents: {error:?}"));
+    assert_eq!(
+        report.surfaces_composited, 1,
+        "only the surviving client is composed"
+    );
+    assert_eq!(
+        pixel(&presenter, 12, 12),
+        under.to_vec(),
+        "the survivor keeps drawing exactly what it drew before"
+    );
+    assert_eq!(
+        pixel(&presenter, 2, 2),
+        under.to_vec(),
+        "and what the departed client covered is the survivor's again, not a hole"
+    );
 }
