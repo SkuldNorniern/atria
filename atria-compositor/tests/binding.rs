@@ -136,6 +136,7 @@ fn operations_the_wire_defines_and_the_state_machine_does_not_model_are_reported
     // fully specified on the wire and has nowhere to go yet.
     let modelled = [
         Operation::DisplayGetRegistry,
+        Operation::RegistryBind,
         Operation::ShmCreatePool,
         Operation::ShmPoolCreateBuffer,
         Operation::ShmPoolDestroy,
@@ -519,5 +520,106 @@ fn an_unknown_pixel_format_is_refused() {
             },
         ),
         Err(StateError::InvalidState { object_id: id(301) })
+    );
+}
+
+/// §12.1: a client binds a version the compositor advertised. Binding higher would have it send
+/// operations the compositor does not implement, and the bound version is fixed for the object's
+/// life — there is nothing to negotiate down to afterwards.
+#[test]
+fn a_global_cannot_be_bound_above_the_version_advertised() {
+    let mut state = CompositorState::new(
+        CapabilitySet::default_grants(),
+        ServerLimits::default(),
+        ConnectionLimits::default(),
+    );
+    let name = state
+        .advertise_global(ObjectKind::Shm, 2)
+        .unwrap_or_else(|| panic!("the global is advertised"));
+    let connection = state
+        .connect(CapabilitySet::default_grants(), CapabilitySet::empty())
+        .expect("baseline capabilities overlap");
+
+    for version in [3, 4, u32::MAX] {
+        assert_eq!(
+            state.dispatch(
+                connection,
+                ClientRequest::Bind {
+                    name,
+                    version,
+                    new_id: id(300),
+                },
+            ),
+            Err(StateError::InvalidState { object_id: id(300) }),
+            "version {version} is above the advertised 2"
+        );
+    }
+
+    // Zero is not a version. Every interface starts at one.
+    assert_eq!(
+        state.dispatch(
+            connection,
+            ClientRequest::Bind {
+                name,
+                version: 0,
+                new_id: id(300),
+            },
+        ),
+        Err(StateError::InvalidState { object_id: id(300) })
+    );
+
+    // An earlier version is legal: a compositor supports every version back to one for as long as
+    // it advertises the latest.
+    state
+        .dispatch(
+            connection,
+            ClientRequest::Bind {
+                name,
+                version: 1,
+                new_id: id(300),
+            },
+        )
+        .expect("an earlier version binds");
+    assert_eq!(
+        state.object_kind(connection, id(300)),
+        Some(ObjectKind::Shm)
+    );
+}
+
+/// A name nothing advertises is not a global, and a withdrawn name is never reused — a client may
+/// still have it in flight.
+#[test]
+fn an_unadvertised_name_does_not_bind_and_a_withdrawn_name_is_not_reissued() {
+    let mut state = CompositorState::new(
+        CapabilitySet::default_grants(),
+        ServerLimits::default(),
+        ConnectionLimits::default(),
+    );
+    let connection = state
+        .connect(CapabilitySet::default_grants(), CapabilitySet::empty())
+        .expect("baseline capabilities overlap");
+
+    assert_eq!(
+        state.dispatch(
+            connection,
+            ClientRequest::Bind {
+                name: 99,
+                version: 1,
+                new_id: id(300),
+            },
+        ),
+        Err(StateError::InvalidState { object_id: id(300) })
+    );
+
+    let first = state
+        .advertise_global(ObjectKind::Shm, 1)
+        .unwrap_or_else(|| panic!("the global is advertised"));
+    assert!(state.withdraw_global(first));
+    let second = state
+        .advertise_global(ObjectKind::Compositor, 1)
+        .unwrap_or_else(|| panic!("another global is advertised"));
+    assert_ne!(
+        first, second,
+        "a withdrawn name is never handed to a different global"
     );
 }

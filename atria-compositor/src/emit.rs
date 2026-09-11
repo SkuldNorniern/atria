@@ -7,7 +7,9 @@
 
 use atria_protocol::error::ErrorCode as WireErrorCode;
 use atria_protocol::interface::Operation;
-use atria_protocol::message::{DisplayError, EncodePayload, FrameDone, NewId, encode_message};
+use atria_protocol::message::{
+    DisplayError, EncodePayload, FrameDone, GlobalName, NewId, RegistryGlobal, encode_message,
+};
 use atria_protocol::wire::Encoder;
 use atria_protocol::{EncodeError, ObjectId, Opcode};
 
@@ -64,6 +66,30 @@ pub fn encode_event(event: &Event, sequence: u32, out: &mut [u8]) -> Result<usiz
             emit(
                 ObjectId::DISPLAY,
                 Operation::DisplayDeleteId,
+                sequence,
+                &payload,
+                out,
+            )
+        }
+        EventKind::Global {
+            name,
+            interface,
+            version,
+        } => {
+            let payload = RegistryGlobal {
+                name: *name,
+                // The interface's own name, from the table that defines it, so a client and the
+                // compositor cannot disagree about what a global is called.
+                interface: interface.name(),
+                version: *version,
+            };
+            emit(object, Operation::RegistryGlobal, sequence, &payload, out)
+        }
+        EventKind::GlobalRemove { name } => {
+            let payload = GlobalName { name: *name };
+            emit(
+                object,
+                Operation::RegistryGlobalRemove,
                 sequence,
                 &payload,
                 out,

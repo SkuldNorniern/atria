@@ -14,6 +14,9 @@ use crate::model::{
     Event, EventKind, FocusEvent, ObjectKind, Point, Rect, SeatCapabilities, SeatSnapshot,
     SessionSnapshot, Size, SurfaceKey, SurfaceRole, SurfaceSnapshot, pixel_format_is_known,
 };
+use atria_protocol::interface::Interface;
+
+use crate::binding::interface_of;
 use crate::registry::{ObjectRegistry, Teardown};
 use crate::resolve::SharedMemory;
 
@@ -196,10 +199,22 @@ struct Scene {
     stack: Vec<SurfaceKey>,
 }
 
+/// A global the registry advertises: what it offers, and up to which version.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Global {
+    interface: Interface,
+    kind: ObjectKind,
+    version: u32,
+}
+
 /// The protocol state machine between decoded messages and a display/input backend.
 #[derive(Clone, Debug)]
 pub struct CompositorState {
     server_capabilities: CapabilitySet,
+    /// Globals by name. A name is stable for as long as the global is advertised, and is never
+    /// reused after it is withdrawn — a client may still have one in flight.
+    globals: BTreeMap<u32, Global>,
+    next_global: u32,
     server_limits: ServerLimits,
     limits: ConnectionLimits,
     next_connection: u64,
@@ -222,6 +237,8 @@ impl CompositorState {
             server_capabilities: server_capabilities
                 .with(Capability::SurfaceCreate)
                 .with(Capability::BufferImport),
+            globals: BTreeMap::new(),
+            next_global: 1,
             server_limits,
             limits,
             next_connection: 1,
@@ -448,8 +465,17 @@ impl CompositorState {
     ) -> Result<(), StateError> {
         match request {
             ClientRequest::CreateRegistry { new_id } => {
-                self.allocate_client(connection, new_id, ObjectKind::Registry, Object::Registry)
+                self.allocate_client(connection, new_id, ObjectKind::Registry, Object::Registry)?;
+                // A registry that advertises nothing is a client that can reach nothing, so the
+                // announcements are part of creating it rather than a later step.
+                self.announce_globals(connection);
+                Ok(())
             }
+            ClientRequest::Bind {
+                name,
+                version,
+                new_id,
+            } => self.bind_global(connection, name, version, new_id),
             ClientRequest::CreatePool { new_id, memory } => {
                 self.require_capability(connection, new_id, Capability::BufferImport)?;
                 self.check_kind_quota(connection, ObjectKind::ShmPool)?;
@@ -1045,23 +1071,81 @@ impl CompositorState {
             .map(|value| &value.snapshot)
     }
 
-    /// Offer a global to a connection at an identifier it may then address.
+    /// Advertise a global, returning the name the registry will give it.
     ///
-    /// Server-side until `registry.bind` is modelled: a client cannot reach a factory it has no
-    /// object for, and the globals a compositor offers are its own decision rather than a
-    /// request. When bind lands this becomes what bind does.
-    pub fn install_global(
+    /// Which globals exist is the compositor's decision rather than a request, and it is made
+    /// once: a name is stable while the global is advertised, and is never reused after it is
+    /// withdrawn, because a client may still have that name in flight.
+    pub fn advertise_global(&mut self, kind: ObjectKind, version: u32) -> Option<u32> {
+        let interface = interface_of(kind)?;
+        let name = self.next_global;
+        self.next_global = self.next_global.checked_add(1)?;
+        self.globals.insert(
+            name,
+            Global {
+                interface,
+                kind,
+                version,
+            },
+        );
+        Some(name)
+    }
+
+    /// Withdraw a global. Objects already bound from it become inert rather than invalid.
+    pub fn withdraw_global(&mut self, name: u32) -> bool {
+        if self.globals.remove(&name).is_none() {
+            return false;
+        }
+        let connections: Vec<_> = self.connections.keys().copied().collect();
+        for connection in connections {
+            self.push_event(
+                connection,
+                ObjectId::DISPLAY,
+                EventKind::GlobalRemove { name },
+            );
+        }
+        true
+    }
+
+    /// Every global the registry advertises, as the events a fresh registry receives.
+    fn announce_globals(&mut self, connection: ConnectionId) {
+        let announcements: Vec<_> = self
+            .globals
+            .iter()
+            .map(|(name, global)| (*name, global.interface, global.version))
+            .collect();
+        for (name, interface, version) in announcements {
+            self.push_event(
+                connection,
+                ObjectId::DISPLAY,
+                EventKind::Global {
+                    name,
+                    interface,
+                    version,
+                },
+            );
+        }
+    }
+
+    /// Take a global at an identifier the client chose.
+    fn bind_global(
         &mut self,
         connection: ConnectionId,
-        id: ObjectId,
-        kind: ObjectKind,
+        name: u32,
+        version: u32,
+        new_id: ObjectId,
     ) -> Result<(), StateError> {
-        match kind {
-            ObjectKind::Compositor | ObjectKind::Shm => {
-                self.allocate_client(connection, id, kind, Object::Global)
-            }
-            _ => Err(StateError::InvalidState { object_id: id }),
+        let global = *self
+            .globals
+            .get(&name)
+            .ok_or(StateError::InvalidState { object_id: new_id })?;
+        // §12.1: a client binds a version the compositor advertised. Binding higher would have it
+        // sending operations the compositor does not implement, and there is no version to
+        // negotiate down to afterwards — the bound version is fixed for the object's life.
+        if version == 0 || version > global.version {
+            return Err(StateError::InvalidState { object_id: new_id });
         }
+        self.allocate_client(connection, new_id, global.kind, Object::Global)
     }
 
     /// The memory a pool covers, as resolution validated it.

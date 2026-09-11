@@ -2,6 +2,7 @@ use alloc::vec::Vec;
 
 use atria_protocol::ObjectId;
 use atria_protocol::capability::Capability;
+use atria_protocol::interface::Interface;
 use atria_protocol::opcode::Opcode;
 
 use crate::resolve::SharedMemory;
@@ -213,6 +214,12 @@ pub enum ClientRequest {
     CreateRegistry {
         new_id: ObjectId,
     },
+    /// Take a global the registry advertised, at an identifier the client chooses.
+    Bind {
+        name: u32,
+        version: u32,
+        new_id: ObjectId,
+    },
     /// Adopt a client's shared memory, already resolved from the handle slot that named it.
     CreatePool {
         new_id: ObjectId,
@@ -277,6 +284,16 @@ pub enum EventKind {
     ObjectDestroyed(ObjectKind),
     /// The identifier is retired and the client may allocate it again.
     IdRetired,
+    /// A global exists, and what interface and version it offers.
+    Global {
+        name: u32,
+        interface: Interface,
+        version: u32,
+    },
+    /// A global has gone. Objects bound from it are inert.
+    GlobalRemove {
+        name: u32,
+    },
     BufferRelease,
     BufferReleaseWithFence {
         fence: ObjectId,

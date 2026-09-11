@@ -10,7 +10,7 @@
 
 use atria_protocol::interface::{Interface, MessageKind, Operation, decode_operation};
 use atria_protocol::message::{
-    Attach, Commit, CreateBuffer, CreatePool, DamageBuffer, GetRegistry, NewId,
+    Attach, Bind, Commit, CreateBuffer, CreatePool, DamageBuffer, GetRegistry, NewId,
 };
 use atria_protocol::wire::{Frame, HandleIndex};
 use atria_protocol::{DecodeError, ObjectId, Opcode};
@@ -90,6 +90,11 @@ pub enum DecodedRequest {
     CreateSurface {
         new_id: ObjectId,
     },
+    Bind {
+        name: u32,
+        version: u32,
+        new_id: ObjectId,
+    },
     Attach {
         surface: ObjectId,
         buffer: ObjectId,
@@ -148,6 +153,14 @@ pub fn decode(kind: ObjectKind, frame: &Frame<'_>) -> Result<DecodedRequest, Bin
                 },
                 stride: payload.stride,
                 format: payload.format,
+            })
+        }
+        Operation::RegistryBind => {
+            let payload = Bind::decode(frame.payload)?;
+            Ok(DecodedRequest::Bind {
+                name: payload.name,
+                version: payload.version,
+                new_id: payload.new_id,
             })
         }
         Operation::CompositorCreateSurface => {
@@ -224,6 +237,15 @@ pub fn resolve(
             format,
         }),
         DecodedRequest::CreateSurface { new_id } => Ok(ClientRequest::CreateSurface { new_id }),
+        DecodedRequest::Bind {
+            name,
+            version,
+            new_id,
+        } => Ok(ClientRequest::Bind {
+            name,
+            version,
+            new_id,
+        }),
         DecodedRequest::Attach {
             surface,
             buffer,
