@@ -574,3 +574,65 @@ fn a_break_in_routing_lets_go_of_every_key_that_was_held() {
         "pressing it again takes effect rather than being read as a repeat"
     );
 }
+
+/// Focus carries every key held, not only the modifiers.
+///
+/// A client given focus mid-chord and told only about later releases would believe keys were up
+/// that are not, and act on a chord it never saw begin.
+#[test]
+fn focus_arriving_says_which_keys_are_already_down() {
+    let mut state = server();
+    let (first, first_surface) = window(&mut state, 100, Point { x: 0, y: 0 });
+    let (second, second_surface) = window(&mut state, 100, Point { x: 200, y: 200 });
+    for client in [first, second] {
+        state
+            .dispatch(
+                client,
+                ClientRequest::GetKeyboard {
+                    seat: id(3),
+                    new_id: id(5),
+                },
+            )
+            .unwrap_or_else(|error| panic!("a keyboard: {error:?}"));
+    }
+    state
+        .set_keyboard_focus(Some(first_surface))
+        .unwrap_or_else(|error| panic!("focus: {error:?}"));
+
+    // A letter and a modifier, both held while the focus moves.
+    state.key(PhysicalKey::from_usage(usage::W), true, 1_000);
+    state.key(PhysicalKey::from_usage(usage::LEFT_SHIFT), true, 2_000);
+    let _ = state.take_events();
+
+    state
+        .set_keyboard_focus(Some(second_surface))
+        .unwrap_or_else(|error| panic!("focus moves: {error:?}"));
+
+    let gained = state
+        .take_events()
+        .into_iter()
+        .filter(|event| event.connection == second)
+        .find_map(|event| match event.kind {
+            EventKind::KeyFocusGained {
+                held, modifiers, ..
+            } => Some((held, modifiers)),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the new focus is told it has the keys"));
+
+    assert!(
+        gained.0.contains(&PhysicalKey::from_usage(usage::W)),
+        "an ordinary key held across the move travels with it: {:?}",
+        gained.0
+    );
+    assert!(
+        gained
+            .0
+            .contains(&PhysicalKey::from_usage(usage::LEFT_SHIFT)),
+        "and so does a modifier"
+    );
+    assert!(
+        gained.1.contains(Modifiers::SHIFT),
+        "which is also summarised, because asking about control should not mean tracking both sides"
+    );
+}
