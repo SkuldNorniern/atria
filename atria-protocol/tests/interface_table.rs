@@ -170,14 +170,15 @@ fn the_documented_sizes_are_the_computed_sizes() {
     }
 }
 
-/// The three variable-length messages, named so that adding a fourth is a deliberate act rather
-/// than something a reader discovers from a `None`.
+/// The variable-length messages, named so that adding one is a deliberate act rather than
+/// something a reader discovers from a `None`.
 #[test]
 fn only_the_string_carrying_messages_are_variable_length() {
     let variable = [
         Operation::DisplayError,
         Operation::RegistryGlobal,
         Operation::ToplevelSetTitle,
+        Operation::ShellControlToplevel,
     ];
 
     for interface in INTERFACES {
@@ -195,8 +196,8 @@ fn only_the_string_carrying_messages_are_variable_length() {
 
 /// Every interface the draw path names is in the table exactly once.
 #[test]
-fn the_table_holds_ten_interfaces() {
-    assert_eq!(INTERFACES.len(), 10);
+fn the_table_holds_eleven_interfaces() {
+    assert_eq!(INTERFACES.len(), 11);
     for (index, interface) in INTERFACES.iter().enumerate() {
         for other in &INTERFACES[index + 1..] {
             assert_ne!(interface.name(), other.name(), "duplicate interface name");

@@ -52,6 +52,10 @@ pub enum Interface {
     Shell,
     Toplevel,
     Output,
+    /// The authority a shell holds over every window, separate from the role factory an
+    /// application uses. Two interfaces because they are two powers: an application gives its own
+    /// surface window semantics, a shell arranges everyone's.
+    ShellControl,
 }
 
 /// Whether an operation travels from the client or to it.
@@ -136,6 +140,15 @@ pub enum Operation {
     OutputMode,
     OutputScale,
     OutputDone,
+    ShellControlConfigure,
+    ShellControlPlace,
+    ShellControlRaise,
+    ShellControlFocus,
+    ShellControlClose,
+    ShellControlToplevel,
+    ShellControlToplevelGone,
+    ShellControlFocusChanged,
+    ShellControlSnapshotDone,
 }
 
 /// Shorthand for one table row.
@@ -233,6 +246,30 @@ impl Operation {
             Self::OutputMode => spec(I::Output, Event, 2, "mode", &[U32, U32, U32]),
             Self::OutputScale => spec(I::Output, Event, 3, "scale", &[U32, U32]),
             Self::OutputDone => spec(I::Output, Event, 4, "done", &[]),
+            Self::ShellControlConfigure => spec(
+                I::ShellControl,
+                Method,
+                0,
+                "configure",
+                &[U64, U32, U32, U32],
+            ),
+            Self::ShellControlPlace => spec(I::ShellControl, Method, 1, "place", &[U64, I32, I32]),
+            Self::ShellControlRaise => spec(I::ShellControl, Method, 2, "raise", &[U64]),
+            Self::ShellControlFocus => spec(I::ShellControl, Method, 3, "focus", &[U64]),
+            Self::ShellControlClose => spec(I::ShellControl, Method, 4, "close", &[U64]),
+            // One event for a window the shell is being told about, whether it existed before the
+            // shell attached or appeared after. The snapshot boundary is what separates those, so
+            // a second event carrying the same fields would say nothing the boundary does not.
+            Self::ShellControlToplevel => {
+                spec(I::ShellControl, Event, 0, "toplevel", &[U64, String])
+            }
+            Self::ShellControlToplevelGone => {
+                spec(I::ShellControl, Event, 1, "toplevel_gone", &[U64])
+            }
+            Self::ShellControlFocusChanged => {
+                spec(I::ShellControl, Event, 2, "focus_changed", &[U64])
+            }
+            Self::ShellControlSnapshotDone => spec(I::ShellControl, Event, 3, "snapshot_done", &[]),
         }
     }
 
@@ -267,6 +304,7 @@ impl Interface {
             Self::Shell => "atria_shell",
             Self::Toplevel => "atria_toplevel",
             Self::Output => "atria_output",
+            Self::ShellControl => "atria_shell_control",
         }
     }
 
@@ -296,6 +334,13 @@ impl Interface {
                 O::ToplevelSetMaxSize,
             ],
             Self::Output => &[],
+            Self::ShellControl => &[
+                O::ShellControlConfigure,
+                O::ShellControlPlace,
+                O::ShellControlRaise,
+                O::ShellControlFocus,
+                O::ShellControlClose,
+            ],
         }
     }
 
@@ -311,6 +356,12 @@ impl Interface {
             Self::Buffer => &[O::BufferRelease],
             Self::Surface => &[O::SurfaceEnter, O::SurfaceLeave, O::SurfaceFrameDone],
             Self::Toplevel => &[O::ToplevelConfigure, O::ToplevelClose],
+            Self::ShellControl => &[
+                O::ShellControlToplevel,
+                O::ShellControlToplevelGone,
+                O::ShellControlFocusChanged,
+                O::ShellControlSnapshotDone,
+            ],
             Self::Output => &[
                 O::OutputIdentity,
                 O::OutputGeometry,
@@ -356,6 +407,7 @@ pub const INTERFACES: &[Interface] = &[
     Interface::Shell,
     Interface::Toplevel,
     Interface::Output,
+    Interface::ShellControl,
 ];
 
 /// The states a toplevel may be told it is in.
