@@ -5,9 +5,7 @@ use atria_compositor::{
     resolve,
 };
 use atria_protocol::wire::{Frame, MAX_MESSAGE_SIZE};
-use atria_transport::{
-    Envelope, EnvelopeResolver, SharedMemoryStore, Transport, TransportError, UnixTransport,
-};
+use atria_transport::{Envelope, EnvelopeResolver, SharedMemorySource, Transport, TransportError};
 
 /// Why serving one message stopped.
 ///
@@ -45,21 +43,25 @@ pub struct Served {
 }
 
 /// One client: its transport, its connection in the compositor, and the memory it handed over.
-pub struct Session {
-    transport: UnixTransport,
+///
+/// Generic over the transport because the handle that carries a client's memory is a platform
+/// decision. Where the memory is kept follows from the transport rather than being assumed, so a
+/// session over Artery capabilities is the same code as a session over a Unix socket.
+pub struct Session<T: Transport> {
+    transport: T,
     connection: ConnectionId,
-    memory: SharedMemoryStore,
+    memory: T::Memory,
     sequence: u32,
 }
 
-impl Session {
+impl<T: Transport> Session<T> {
     /// Attach a transport to a connection the compositor has already accepted.
     #[must_use]
-    pub fn new(transport: UnixTransport, connection: ConnectionId) -> Self {
+    pub fn new(transport: T, connection: ConnectionId) -> Self {
         Self {
             transport,
             connection,
-            memory: SharedMemoryStore::new(),
+            memory: T::Memory::default(),
             sequence: 1,
         }
     }
@@ -72,7 +74,7 @@ impl Session {
 
     /// The memory this client has handed over, for a caller about to read pixels out of it.
     #[must_use]
-    pub const fn memory(&self) -> &SharedMemoryStore {
+    pub const fn memory(&self) -> &T::Memory {
         &self.memory
     }
 
@@ -118,7 +120,11 @@ impl Session {
     }
 
     /// Decode, resolve and dispatch one message.
-    fn act(&mut self, state: &mut CompositorState, envelope: &mut Envelope) -> Result<(), Refused> {
+    fn act(
+        &mut self,
+        state: &mut CompositorState,
+        envelope: &mut Envelope<T::Handle>,
+    ) -> Result<(), Refused> {
         // The bytes come out of the envelope so decoding borrows them while resolution mutates
         // the handles that stayed behind.
         let bytes = envelope.take_bytes();

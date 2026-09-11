@@ -140,7 +140,7 @@ impl Client {
 /// Bring a client all the way to a committed frame.
 fn draw(
     client: &mut Client,
-    session: &mut Session,
+    session: &mut Session<UnixTransport>,
     state: &mut CompositorState,
     pool: u32,
     buffer: u32,
@@ -249,7 +249,7 @@ fn accept(
     transport: UnixTransport,
     client: &mut Client,
     globals: (u32, u32),
-) -> Session {
+) -> Session<UnixTransport> {
     let connection = state
         .connect(software_capabilities(), CapabilitySet::empty())
         .unwrap_or_else(|error| panic!("the server's own capabilities always overlap: {error:?}"));

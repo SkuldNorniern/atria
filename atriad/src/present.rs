@@ -11,7 +11,7 @@ use atria_software_output::{
     BufferKey, BufferStore, Frame, FrameReport, FrameSink, PixelLayout, PresentError,
     SoftwareBuffer, SoftwareOutput, ValidationError,
 };
-use atria_transport::SharedMemoryStore;
+use atria_transport::{SharedMemorySource, Transport};
 
 use crate::session::Session;
 
@@ -61,7 +61,7 @@ impl Presenter {
         &mut self,
         state: &CompositorState,
         connection: ConnectionId,
-        memory: &SharedMemoryStore,
+        memory: &impl SharedMemorySource,
         buffer: ObjectId,
     ) -> Result<(), PresentFailure> {
         let source = state
@@ -118,7 +118,7 @@ impl Presenter {
 pub fn present_committed(
     presenter: &mut Presenter,
     state: &mut CompositorState,
-    session: &mut Session,
+    session: &mut Session<impl Transport>,
     timestamp_ns: u64,
     sink: &mut impl FrameSink,
 ) -> Result<FrameReport, PresentFailure> {
@@ -153,7 +153,7 @@ pub fn present_committed(
 pub fn present_for(
     presenter: &mut Presenter,
     state: &mut CompositorState,
-    session: &mut Session,
+    session: &mut Session<impl Transport>,
     buffer: ObjectId,
     timestamp_ns: u64,
     sink: &mut impl FrameSink,

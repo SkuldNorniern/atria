@@ -9,8 +9,8 @@ use libc::{
 use atria_compositor::{HandleResolver, ResolveError};
 use atria_protocol::wire::{HandleIndex, HandleKind, MAX_MESSAGE_SIZE};
 use atria_transport::{
-    Envelope, EnvelopeResolver, MAX_HANDLES, SharedMemoryStore, Transport, TransportError,
-    UnixTransport,
+    Envelope, EnvelopeResolver, MAX_HANDLES, SharedMemorySource, SharedMemoryStore, Transport,
+    TransportError, UnixTransport,
 };
 
 /// A connected `SOCK_SEQPACKET` pair.
@@ -209,6 +209,6 @@ fn an_envelope_carries_the_bytes_that_arrived() {
     let message: Vec<u8> = (0..64_u8).collect();
     client.send(&message, &[]).expect("it sends");
 
-    let envelope: Envelope = server.receive().expect("it arrives");
+    let envelope: Envelope<OwnedFd> = server.receive().expect("it arrives");
     assert_eq!(envelope.bytes(), message.as_slice());
 }
