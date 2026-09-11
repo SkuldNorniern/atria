@@ -1,8 +1,9 @@
 //! The authority a shell holds, and what a shell sees when it takes over from one that died.
 
 use atria_compositor::{
-    ClientRequest, CompositorState, ConnectionId, ConnectionLimits, EventKind, ObjectKind, Point,
-    ServerLimits, ShellError, Size, TitleText, ToplevelHandle,
+    BufferDescriptor, BufferTransport, ClientRequest, CompositorState, ConnectionId,
+    ConnectionLimits, EventKind, ObjectKind, Point, ServerLimits, ShellError, Size, TitleText,
+    ToplevelHandle,
 };
 use atria_protocol::ObjectId;
 use atria_protocol::capability::{Capability, CapabilitySet};
@@ -15,7 +16,9 @@ fn id(raw: u32) -> ObjectId {
 
 fn server() -> CompositorState {
     let mut state = CompositorState::new(
-        CapabilitySet::default_grants().with(Capability::ShellControl),
+        CapabilitySet::default_grants()
+            .with(Capability::ShellControl)
+            .with(Capability::SoftwareShm),
         ServerLimits::default(),
         ConnectionLimits::default(),
     );
@@ -28,7 +31,10 @@ fn server() -> CompositorState {
 /// An ordinary application: a connection with no shell authority, holding one window.
 fn application(state: &mut CompositorState, title: &str) -> (ConnectionId, ToplevelHandle) {
     let connection = state
-        .connect(CapabilitySet::default_grants(), CapabilitySet::empty())
+        .connect(
+            CapabilitySet::default_grants().with(Capability::SoftwareShm),
+            CapabilitySet::empty(),
+        )
         .unwrap_or_else(|error| panic!("an application connects: {error:?}"));
     state
         .create_session(connection, id(9), None, true)
@@ -75,6 +81,75 @@ fn shell(state: &mut CompositorState) -> ConnectionId {
     state
         .grant_capability(connection, Capability::ShellControl)
         .unwrap_or_else(|error| panic!("the authority is granted: {error:?}"));
+    connection
+}
+
+/// Give an application's window real content, so it can hold focus.
+///
+/// Focus requires a mapped surface: input reaching a window that is drawing nothing would be
+/// input going somewhere the user cannot see.
+fn map_window(state: &mut CompositorState, connection: ConnectionId) {
+    state
+        .dispatch(
+            connection,
+            ClientRequest::ImportBuffer {
+                new_id: id(300),
+                descriptor: BufferDescriptor {
+                    transport: BufferTransport::SoftwareShm,
+                    size: Size {
+                        width: 100,
+                        height: 80,
+                    },
+                    stride: 400,
+                    byte_len: 32_000,
+                },
+            },
+        )
+        .unwrap_or_else(|error| panic!("a buffer: {error:?}"));
+    state
+        .dispatch(
+            connection,
+            ClientRequest::Attach {
+                surface: id(256),
+                buffer: id(300),
+                offset: Point::default(),
+                acquire_fence: None,
+            },
+        )
+        .unwrap_or_else(|error| panic!("an attach: {error:?}"));
+    state
+        .dispatch(connection, ClientRequest::Commit { surface: id(256) })
+        .unwrap_or_else(|error| panic!("a commit: {error:?}"));
+}
+
+/// A shell that has bound its authority, past its snapshot.
+fn attached_shell(state: &mut CompositorState) -> ConnectionId {
+    let connection = shell(state);
+    state
+        .dispatch(connection, ClientRequest::CreateRegistry { new_id: id(2) })
+        .unwrap_or_else(|error| panic!("a registry: {error:?}"));
+    let control = state
+        .take_events()
+        .into_iter()
+        .find_map(|event| match event.kind {
+            EventKind::Global {
+                name,
+                interface: Interface::ShellControl,
+                ..
+            } => Some(name),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the authority is offered"));
+    state
+        .dispatch(
+            connection,
+            ClientRequest::Bind {
+                name: control,
+                version: 1,
+                new_id: id(3),
+            },
+        )
+        .unwrap_or_else(|error| panic!("the shell binds: {error:?}"));
     connection
 }
 
@@ -491,4 +566,128 @@ fn binding_the_shell_authority_requires_the_grant() {
             },
         )
         .unwrap_or_else(|error| panic!("a granted shell binds it: {error:?}"));
+}
+
+/// After the snapshot, the same events mean "this just happened".
+///
+/// A shell that only learned the world once would arrange a desktop that stopped matching it the
+/// moment anything opened, closed or took focus.
+#[test]
+fn a_shell_is_told_about_windows_that_arrive_after_it_attached() {
+    let mut state = server();
+    let shell = attached_shell(&mut state);
+    let _ = state.take_events();
+
+    let (client, window) = application(&mut state, "ledger");
+    map_window(&mut state, client);
+
+    let told: Vec<_> = state
+        .take_events()
+        .into_iter()
+        .filter(|event| event.connection == shell)
+        .map(|event| event.kind)
+        .collect();
+    assert!(
+        told.iter().any(|kind| matches!(
+            kind,
+            EventKind::ShellToplevel { handle, title } if *handle == window && title == "ledger"
+        )),
+        "a window that opened after the shell attached reaches it, by name and handle"
+    );
+
+    // Focus moving is the shell's business too: it is what draws the active window differently.
+    let surface = state
+        .shell_toplevels()
+        .into_iter()
+        .find(|record| record.handle == window)
+        .expect("the window");
+    let _ = state.take_events();
+    state
+        .shell_focus(shell, window)
+        .unwrap_or_else(|error| panic!("the shell focuses it: {error:?}"));
+    let focused: Vec<_> = state
+        .take_events()
+        .into_iter()
+        .filter(|event| event.connection == shell)
+        .map(|event| event.kind)
+        .collect();
+    assert!(
+        focused.iter().any(
+            |kind| matches!(kind, EventKind::ShellFocusChanged { handle } if *handle == window)
+        ),
+        "and the shell is told which window now holds focus"
+    );
+
+    // The application closes the window. The shell must stop drawing it.
+    let _ = state.take_events();
+    state
+        .dispatch(
+            client,
+            ClientRequest::Destroy {
+                object: surface.object_id,
+            },
+        )
+        .unwrap_or_else(|error| panic!("the client closes its window: {error:?}"));
+    let gone: Vec<_> = state
+        .take_events()
+        .into_iter()
+        .filter(|event| event.connection == shell)
+        .map(|event| event.kind)
+        .collect();
+    assert!(
+        gone.iter().any(
+            |kind| matches!(kind, EventKind::ShellToplevelGone { handle } if *handle == window)
+        ),
+        "a window that has gone is one the shell is told about, not one it discovers"
+    );
+}
+
+/// A window that never sets a title still reaches the shell.
+///
+/// Otherwise the only thing announcing a window would be the title it happens to set, and a
+/// window that sets none would be invisible to the shell while being visible on the screen.
+#[test]
+fn a_window_with_no_title_is_still_announced() {
+    let mut state = server();
+    let shell = attached_shell(&mut state);
+    let _ = state.take_events();
+
+    let client = state
+        .connect(
+            CapabilitySet::default_grants().with(Capability::SoftwareShm),
+            CapabilitySet::empty(),
+        )
+        .unwrap_or_else(|error| panic!("an application connects: {error:?}"));
+    state
+        .create_session(client, id(9), None, true)
+        .unwrap_or_else(|error| panic!("its session: {error:?}"));
+    state
+        .dispatch(client, ClientRequest::CreateSurface { new_id: id(256) })
+        .unwrap_or_else(|error| panic!("a surface: {error:?}"));
+    state
+        .dispatch(
+            client,
+            ClientRequest::GetToplevel {
+                surface: id(256),
+                new_id: id(257),
+            },
+        )
+        .unwrap_or_else(|error| panic!("a window role: {error:?}"));
+
+    let handle = state
+        .toplevel_handle(client, id(257))
+        .unwrap_or_else(|| panic!("the window has a handle"));
+    let told: Vec<_> = state
+        .take_events()
+        .into_iter()
+        .filter(|event| event.connection == shell)
+        .map(|event| event.kind)
+        .collect();
+    assert!(
+        told.iter().any(|kind| matches!(
+            kind,
+            EventKind::ShellToplevel { handle: announced, title } if *announced == handle && title.is_empty()
+        )),
+        "taking a window role is what announces a window, not naming it"
+    );
 }

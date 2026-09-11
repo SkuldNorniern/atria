@@ -541,7 +541,17 @@ impl CompositorState {
                 self.get_toplevel(connection, surface, new_id)
             }
             ClientRequest::SetTitle { toplevel, title } => {
-                self.toplevel_mut(connection, toplevel)?.title = title;
+                let state = self.toplevel_mut(connection, toplevel)?;
+                state.title = title;
+                let handle = state.handle;
+                let named = state.title.as_str().into();
+                // The same event a shell got in its snapshot. One event meaning "here is this
+                // window as it now stands" is one code path in every shell, rather than two that
+                // must agree.
+                self.tell_shells(EventKind::ShellToplevel {
+                    handle,
+                    title: named,
+                });
                 Ok(())
             }
             ClientRequest::SetMinSize { toplevel, size } => {
@@ -1175,7 +1185,25 @@ impl CompositorState {
             self.push_event(new.connection, new.object_id, EventKind::KeyboardEnter);
         }
         self.keyboard_focus = new_focus;
+        let handle = new_focus
+            .and_then(|surface| self.handle_of_surface(surface))
+            .unwrap_or(ToplevelHandle(0));
+        self.tell_shells(EventKind::ShellFocusChanged { handle });
         Ok(events)
+    }
+
+    /// The window handle for a surface, if that surface is a window.
+    ///
+    /// A shell is told about windows, never surfaces: a surface is a client's own object and the
+    /// shell has never seen its identifier.
+    fn handle_of_surface(&self, surface: SurfaceKey) -> Option<ToplevelHandle> {
+        self.toplevels
+            .iter()
+            .find(|(_, (connection, object_id))| {
+                *connection == surface.connection
+                    && self.toplevel_surface(*connection, *object_id) == Some(surface.object_id)
+            })
+            .map(|(handle, _)| *handle)
     }
 
     pub fn set_session_active(
@@ -1413,6 +1441,29 @@ impl CompositorState {
         self.push_event(connection, object, EventKind::OutputDone);
     }
 
+    /// Tell every attached shell something changed.
+    ///
+    /// A shell that bound its authority is told about windows it did not create, because
+    /// arranging them is its whole purpose. A connection with no shell-control object is told
+    /// nothing, which is the same boundary the grant draws everywhere else.
+    fn tell_shells(&mut self, event: EventKind) {
+        let bound: Vec<_> = self
+            .connections
+            .iter()
+            .flat_map(|(connection, client)| {
+                client
+                    .registry
+                    .ids()
+                    .filter(|id| client.registry.kind_of(*id) == Some(ObjectKind::ShellControl))
+                    .map(move |id| (*connection, id))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        for (connection, object) in bound {
+            self.push_event(connection, object, event.clone());
+        }
+    }
+
     /// Tell a shell the world as it stands, then say the telling is over.
     ///
     /// A shell attaching to a compositor that has been running finds windows already there. It is
@@ -1436,14 +1487,9 @@ impl CompositorState {
         }
         // The shell is told which window holds focus, not which surface: a surface is a client's
         // own object and the shell has never seen its identifier.
-        let focused = self.keyboard_focus.and_then(|surface| {
-            self.shell_toplevels().into_iter().find_map(|record| {
-                (record.connection == surface.connection
-                    && self.toplevel_surface(record.connection, record.object_id)
-                        == Some(surface.object_id))
-                .then_some(record.handle)
-            })
-        });
+        let focused = self
+            .keyboard_focus
+            .and_then(|surface| self.handle_of_surface(surface));
         self.push_event(
             connection,
             control,
@@ -1826,6 +1872,7 @@ impl CompositorState {
             && let Some(handle) = self.toplevel_handle(connection, object_id)
         {
             self.toplevels.remove(&handle);
+            self.tell_shells(EventKind::ShellToplevelGone { handle });
         }
         if let Some(client) = self.connections.get_mut(&connection) {
             if client.registry.remove(object_id).is_some() {
@@ -1981,6 +2028,10 @@ impl CompositorState {
             }),
         )?;
         self.toplevels.insert(handle, (connection, new_id));
+        self.tell_shells(EventKind::ShellToplevel {
+            handle,
+            title: String::new(),
+        });
         Ok(())
     }
 
