@@ -10,11 +10,15 @@ set -euo pipefail
 #   ./run_demo.sh              listens for a viewer on 127.0.0.1:5900
 #   ATRIA_VNC=:5901 ./run_demo.sh
 #   ATRIA_CLIENTS=0 ./run_demo.sh   server and shell only, nothing drawn
+#   ELYSIUM_MODIFIER=alt ./run_demo.sh
 
 VNC_ADDRESS="${ATRIA_VNC:-0.0.0.0:5901}"
 SOCKET="${ATRIA_SOCKET:-/tmp/atria-demo.sock}"
 SHELL_SOCKET="${ATRIA_SHELL_SOCKET:-/tmp/atria-demo-shell.sock}"
 CLIENTS="${ATRIA_CLIENTS:-3}"
+# Which modifier the shell's chords use. A desktop the viewer runs on usually keeps Super for
+# itself, so a remote session generally wants ELYSIUM_MODIFIER=alt.
+MODIFIER="${ELYSIUM_MODIFIER:-super}"
 
 cargo build -p atriad --bin atriad --example draw --example elysium0
 
@@ -40,7 +44,7 @@ for _ in $(seq 1 100); do
     sleep 0.05
 done
 
-./target/debug/examples/elysium0 "${SHELL_SOCKET}" &
+./target/debug/examples/elysium0 "${SHELL_SOCKET}" "${MODIFIER}" &
 started+=($!)
 sleep 0.3
 
@@ -57,6 +61,7 @@ done
 echo
 echo "atria: point a VNC viewer at ${VNC_ADDRESS}"
 echo "atria: clicking a window raises and focuses it"
+echo "atria: ${MODIFIER}+tab cycles windows, ${MODIFIER}+q closes the focused one"
 echo "atria: ctrl-c stops everything"
 echo
 

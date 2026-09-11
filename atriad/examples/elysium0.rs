@@ -6,7 +6,7 @@
 //! that a shell can attach to a compositor already running, that windows outlive the shell, and
 //! that a replacement is handed the same handles its predecessor held.
 //!
-//! Run with: cargo run --example elysium0 -- <shell-socket-path>
+//! Run with: cargo run --example elysium0 -- <shell-socket-path> [super|alt|control|shift]
 
 use std::env::args;
 use std::mem::{size_of, zeroed};
@@ -42,8 +42,11 @@ const CYCLE_WINDOWS: u32 = 2;
 const USAGE_Q: u32 = 0x14;
 const USAGE_TAB: u32 = 0x2b;
 
-/// The meta bit, as the compositor reports modifiers.
-const META: u32 = 1 << 3;
+/// The modifier bits, as the compositor reports them.
+const MOD_CONTROL: u32 = 1 << 0;
+const MOD_SHIFT: u32 = 1 << 1;
+const MOD_ALT: u32 = 1 << 2;
+const MOD_META: u32 = 1 << 3;
 
 /// Modifiers must match exactly, so Super+Shift+Q is somebody else's chord.
 const MATCH_EXACT: u32 = 0;
@@ -67,7 +70,7 @@ fn id(raw: u32) -> ObjectId {
 
 fn main() {
     let path = args().nth(1).unwrap_or_else(|| {
-        eprintln!("elysium0: usage: elysium0 <shell-socket-path>");
+        eprintln!("elysium0: usage: elysium0 <shell-socket-path> [super|alt|control|shift]");
         exit(2);
     });
 
@@ -105,6 +108,14 @@ fn main() {
     );
     // Claimed rather than watched for: the shell learns these chords fired and nothing about
     // anything else typed.
+    // Which modifier holds the shell's chords is policy, and a desktop the viewer runs on
+    // usually keeps Super for itself — so a remote session needs to be able to pick another.
+    let modifier = match args().nth(2).as_deref() {
+        Some("alt") => MOD_ALT,
+        Some("control") => MOD_CONTROL,
+        Some("shift") => MOD_SHIFT,
+        _ => MOD_META,
+    };
     for (shortcut, trigger) in [(CLOSE_FOCUSED, USAGE_Q), (CYCLE_WINDOWS, USAGE_TAB)] {
         shell.request(
             id(SHORTCUTS),
@@ -113,7 +124,7 @@ fn main() {
                 shortcut,
                 seat: SEAT,
                 trigger,
-                modifiers: META,
+                modifiers: modifier,
                 mode: MATCH_EXACT,
             },
         );
