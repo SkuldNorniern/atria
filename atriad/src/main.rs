@@ -252,11 +252,15 @@ fn run() -> io::Result<()> {
 
         let mut dispatched = false;
         if let Some(sink) = viewer.as_ref() {
-            // Input was lost, so what the compositor believes about held keys and buttons no
-            // longer matches the device. A new routing epoch says so rather than guessing.
+            // Either input was lost, or the viewer was away while keys changed. Both leave the
+            // compositor believing something is held that is not, and there is no way to tell
+            // which. Letting go of everything is the only honest answer.
             if sink.overflowed() {
                 eprintln!("atriad: input was lost; starting a new routing epoch");
-                state.reset_pointer();
+                state.reset_input();
+                dispatched = true;
+            } else if sink.stale_input() {
+                state.reset_input();
                 dispatched = true;
             }
             for report in sink.take_input() {

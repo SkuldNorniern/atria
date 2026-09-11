@@ -1874,7 +1874,10 @@ impl CompositorState {
 
     /// Break routing continuity and start a new epoch. Anything in flight from the old one
     /// carries the old epoch and is recognisable as stale.
-    pub fn reset_pointer(&mut self) {
+    ///
+    /// Everything the seat was holding is let go of. A key believed held that is not makes every
+    /// chord after it match wrongly, and there is no way to tell which key was lost.
+    pub fn reset_input(&mut self) {
         if let Some(target) = self.seat.pointer.target.take() {
             self.send_pointer_leave(target);
         }

@@ -318,7 +318,7 @@ fn resetting_routing_starts_an_epoch_a_client_can_tell_apart() {
     let before = state.pointer_epoch();
     let _ = state.take_events();
 
-    state.reset_pointer();
+    state.reset_input();
     assert_eq!(
         state.pointer_epoch(),
         before + 1,
@@ -560,7 +560,7 @@ fn a_break_in_routing_lets_go_of_every_key_that_was_held() {
         "a modifier held is a modifier reported"
     );
 
-    state.reset_pointer();
+    state.reset_input();
     assert!(
         state.modifiers().is_empty(),
         "keys held in the old routing world are not held in the new one"
@@ -634,5 +634,51 @@ fn focus_arriving_says_which_keys_are_already_down() {
     assert!(
         gained.1.contains(Modifiers::SHIFT),
         "which is also summarised, because asking about control should not mean tracking both sides"
+    );
+}
+
+/// A modifier believed held that is not makes every chord after it match wrongly.
+///
+/// This is what a viewer losing focus mid-chord does: the operating system it runs on takes the
+/// key and the release is never sent. Letting go of everything is the only answer, because there
+/// is no way to tell which key was lost.
+#[test]
+fn letting_go_clears_a_modifier_no_one_is_holding() {
+    let mut state = server();
+    let (client, surface) = window(&mut state, 100, Point { x: 0, y: 0 });
+    state
+        .dispatch(
+            client,
+            ClientRequest::GetKeyboard {
+                seat: id(3),
+                new_id: id(5),
+            },
+        )
+        .unwrap_or_else(|error| panic!("a keyboard: {error:?}"));
+    state
+        .set_keyboard_focus(Some(surface))
+        .unwrap_or_else(|error| panic!("focus: {error:?}"));
+
+    // Two modifiers go down, and only one comes back up: the viewer was away for the other.
+    state.key(PhysicalKey::from_usage(usage::LEFT_META), true, 1_000);
+    state.key(PhysicalKey::from_usage(usage::LEFT_ALT), true, 2_000);
+    state.key(PhysicalKey::from_usage(usage::LEFT_ALT), false, 3_000);
+    assert!(
+        state.modifiers().contains(Modifiers::META),
+        "the compositor still believes the lost key is down, which is the whole problem"
+    );
+
+    state.reset_input();
+    assert!(
+        state.modifiers().is_empty(),
+        "letting go takes everything, because which key was lost is unknowable"
+    );
+
+    // And an exact chord matches again, which it could not while the phantom was held.
+    state.key(PhysicalKey::from_usage(usage::LEFT_ALT), true, 4_000);
+    assert_eq!(
+        state.modifiers(),
+        Modifiers(Modifiers::ALT),
+        "alt alone is alt alone again"
     );
 }
