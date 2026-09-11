@@ -1358,3 +1358,165 @@ impl EncodePayload for SeatName {
         write_u64(encoder, self.seat)
     }
 }
+
+/// A surface gained keyboard focus, with what is already held down.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct KeyboardEnter {
+    pub serial: u32,
+    pub surface: ObjectId,
+    pub modifiers: u32,
+    pub epoch: u32,
+}
+
+impl KeyboardEnter {
+    /// # Errors
+    ///
+    /// Returns [`DecodeError`] when the payload is not the four fields the table names.
+    pub fn decode(input: &[u8]) -> Result<Self, DecodeError> {
+        let mut decoder = Decoder::new(input);
+        let value = Self {
+            serial: decoder.read_u32()?,
+            surface: ObjectId::from_raw(decoder.read_u32()?),
+            modifiers: decoder.read_u32()?,
+            epoch: decoder.read_u32()?,
+        };
+        decoder.finish()?;
+        Ok(value)
+    }
+}
+
+impl EncodePayload for KeyboardEnter {
+    fn encoded_len(&self) -> Result<usize, EncodeError> {
+        Ok(16)
+    }
+
+    fn encode(&self, encoder: &mut Encoder<'_>) -> Result<(), EncodeError> {
+        encoder.write_u32(self.serial)?;
+        encoder.write_u32(self.surface.into_raw())?;
+        encoder.write_u32(self.modifiers)?;
+        encoder.write_u32(self.epoch)
+    }
+}
+
+/// A surface lost keyboard focus.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct KeyboardLeave {
+    pub serial: u32,
+    pub surface: ObjectId,
+    pub epoch: u32,
+}
+
+impl KeyboardLeave {
+    /// # Errors
+    ///
+    /// Returns [`DecodeError`] when the payload is not a serial, a surface and an epoch.
+    pub fn decode(input: &[u8]) -> Result<Self, DecodeError> {
+        let mut decoder = Decoder::new(input);
+        let value = Self {
+            serial: decoder.read_u32()?,
+            surface: ObjectId::from_raw(decoder.read_u32()?),
+            epoch: decoder.read_u32()?,
+        };
+        decoder.finish()?;
+        Ok(value)
+    }
+}
+
+impl EncodePayload for KeyboardLeave {
+    fn encoded_len(&self) -> Result<usize, EncodeError> {
+        Ok(12)
+    }
+
+    fn encode(&self, encoder: &mut Encoder<'_>) -> Result<(), EncodeError> {
+        encoder.write_u32(self.serial)?;
+        encoder.write_u32(self.surface.into_raw())?;
+        encoder.write_u32(self.epoch)
+    }
+}
+
+/// A key changed state. The key is a physical position, not a character.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct KeyboardKey {
+    pub serial: u32,
+    pub time_ns: u64,
+    /// A USB HID Keyboard/Keypad usage.
+    pub key: u32,
+    pub state: u32,
+    pub epoch: u32,
+}
+
+impl KeyboardKey {
+    /// # Errors
+    ///
+    /// Returns [`DecodeError`] when the payload is not the five fields the table names.
+    pub fn decode(input: &[u8]) -> Result<Self, DecodeError> {
+        let mut decoder = Decoder::new(input);
+        let serial = decoder.read_u32()?;
+        let time_ns = read_u64(&mut decoder)?;
+        let value = Self {
+            serial,
+            time_ns,
+            key: decoder.read_u32()?,
+            state: decoder.read_u32()?,
+            epoch: decoder.read_u32()?,
+        };
+        decoder.finish()?;
+        Ok(value)
+    }
+}
+
+impl EncodePayload for KeyboardKey {
+    fn encoded_len(&self) -> Result<usize, EncodeError> {
+        Ok(24)
+    }
+
+    fn encode(&self, encoder: &mut Encoder<'_>) -> Result<(), EncodeError> {
+        encoder.write_u32(self.serial)?;
+        write_u64(encoder, self.time_ns)?;
+        encoder.write_u32(self.key)?;
+        encoder.write_u32(self.state)?;
+        encoder.write_u32(self.epoch)
+    }
+}
+
+/// Which modifiers are held, latched and locked, and which group is active.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct KeyboardModifiers {
+    pub depressed: u32,
+    pub latched: u32,
+    pub locked: u32,
+    pub group: u32,
+    pub epoch: u32,
+}
+
+impl KeyboardModifiers {
+    /// # Errors
+    ///
+    /// Returns [`DecodeError`] when the payload is not the five fields the table names.
+    pub fn decode(input: &[u8]) -> Result<Self, DecodeError> {
+        let mut decoder = Decoder::new(input);
+        let value = Self {
+            depressed: decoder.read_u32()?,
+            latched: decoder.read_u32()?,
+            locked: decoder.read_u32()?,
+            group: decoder.read_u32()?,
+            epoch: decoder.read_u32()?,
+        };
+        decoder.finish()?;
+        Ok(value)
+    }
+}
+
+impl EncodePayload for KeyboardModifiers {
+    fn encoded_len(&self) -> Result<usize, EncodeError> {
+        Ok(20)
+    }
+
+    fn encode(&self, encoder: &mut Encoder<'_>) -> Result<(), EncodeError> {
+        encoder.write_u32(self.depressed)?;
+        encoder.write_u32(self.latched)?;
+        encoder.write_u32(self.locked)?;
+        encoder.write_u32(self.group)?;
+        encoder.write_u32(self.epoch)
+    }
+}

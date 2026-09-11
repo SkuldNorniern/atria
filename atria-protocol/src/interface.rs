@@ -61,6 +61,8 @@ pub enum Interface {
     Seat,
     /// One seat's pointing device, as the client it is over sees it.
     Pointer,
+    /// One seat's keyboard, as the client holding focus sees it.
+    Keyboard,
 }
 
 /// Whether an operation travels from the client or to it.
@@ -165,6 +167,12 @@ pub enum Operation {
     PointerMotion,
     PointerButton,
     PointerAxis,
+    SeatGetKeyboard,
+    KeyboardDestroy,
+    KeyboardEnter,
+    KeyboardLeave,
+    KeyboardKey,
+    KeyboardModifiers,
 }
 
 /// Shorthand for one table row.
@@ -318,6 +326,22 @@ impl Operation {
             Self::PointerMotion => spec(I::Pointer, Event, 2, "motion", &[U64, I32, I32, U32]),
             Self::PointerButton => spec(I::Pointer, Event, 3, "button", &[U32, U64, U32, U32, U32]),
             Self::PointerAxis => spec(I::Pointer, Event, 4, "axis", &[U64, U32, I32, U32]),
+            Self::SeatGetKeyboard => spec(I::Seat, Method, 1, "get_keyboard", &[Object]),
+            Self::KeyboardDestroy => spec(I::Keyboard, Method, 0, "destroy", &[]),
+            // Focus carries what is already held down. A client given focus mid-chord and told
+            // only about later releases would believe keys were up that are not.
+            Self::KeyboardEnter => spec(I::Keyboard, Event, 0, "enter", &[U32, Object, U32, U32]),
+            Self::KeyboardLeave => spec(I::Keyboard, Event, 1, "leave", &[U32, Object, U32]),
+            // The key is a physical position, not a character. What a position means depends on a
+            // layout the compositor does not own, and text arrives by its own route.
+            Self::KeyboardKey => spec(I::Keyboard, Event, 2, "key", &[U32, U64, U32, U32, U32]),
+            Self::KeyboardModifiers => spec(
+                I::Keyboard,
+                Event,
+                3,
+                "modifiers",
+                &[U32, U32, U32, U32, U32],
+            ),
         }
     }
 
@@ -355,6 +379,7 @@ impl Interface {
             Self::ShellControl => "atria_shell_control",
             Self::Seat => "atria_seat",
             Self::Pointer => "atria_pointer",
+            Self::Keyboard => "atria_keyboard",
         }
     }
 
@@ -384,8 +409,9 @@ impl Interface {
                 O::ToplevelSetMaxSize,
             ],
             Self::Output => &[],
-            Self::Seat => &[O::SeatGetPointer],
+            Self::Seat => &[O::SeatGetPointer, O::SeatGetKeyboard],
             Self::Pointer => &[O::PointerDestroy],
+            Self::Keyboard => &[O::KeyboardDestroy],
             Self::ShellControl => &[
                 O::ShellControlConfigure,
                 O::ShellControlPlace,
@@ -410,6 +436,12 @@ impl Interface {
             Self::Surface => &[O::SurfaceEnter, O::SurfaceLeave, O::SurfaceFrameDone],
             Self::Toplevel => &[O::ToplevelConfigure, O::ToplevelClose],
             Self::Seat => &[],
+            Self::Keyboard => &[
+                O::KeyboardEnter,
+                O::KeyboardLeave,
+                O::KeyboardKey,
+                O::KeyboardModifiers,
+            ],
             Self::Pointer => &[
                 O::PointerEnter,
                 O::PointerLeave,
@@ -474,6 +506,7 @@ pub const INTERFACES: &[Interface] = &[
     Interface::ShellControl,
     Interface::Seat,
     Interface::Pointer,
+    Interface::Keyboard,
 ];
 
 /// The states a toplevel may be told it is in.

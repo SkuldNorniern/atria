@@ -10,6 +10,7 @@
 pub mod capability;
 pub mod error;
 pub mod interface;
+pub mod key;
 pub mod message;
 pub mod object;
 pub mod opcode;
